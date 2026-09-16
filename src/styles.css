@@ -1,0 +1,255 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark, .dark *));
+
+@theme {
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Fraunces", "Newsreader", ui-serif, Georgia, serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-income: var(--income);
+  --color-expense: var(--expense);
+  --color-warn: var(--warn);
+  --color-overlay: var(--overlay);
+
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-2xl: 28px;
+  --radius: 12px;
+
+  --shadow-border: var(--elev-shadow);
+}
+
+:root {
+  --background: #f3f1ec;
+  --foreground: #1b1a17;
+  --card: #fffcf7;
+  --card-foreground: #1b1a17;
+  --popover: #fffcf7;
+  --popover-foreground: #1b1a17;
+  --primary: #1b1a17;
+  --primary-foreground: #f3f1ec;
+  --secondary: #ece8e0;
+  --secondary-foreground: #1b1a17;
+  --muted: #e7e2d9;
+  --muted-foreground: #6d6a63;
+  --accent: #ece8e0;
+  --accent-foreground: #1b1a17;
+  --destructive: #9a4b44;
+  --destructive-foreground: #f3f1ec;
+  --border: rgb(27 26 23 / 0.1);
+  --input: rgb(27 26 23 / 0.12);
+  --ring: #1b1a17;
+  --income: #3f6b4b;
+  --expense: #9a4b44;
+  --warn: #8a6a32;
+  --overlay: rgb(27 26 23 / 0.4);
+  --elev-shadow:
+    0px 0px 0px 1px rgb(27 26 23 / 0.06),
+    0px 1px 2px -1px rgb(27 26 23 / 0.06),
+    0px 2px 8px 0px rgb(27 26 23 / 0.04);
+}
+
+.dark {
+  --background: #0c0c0d;
+  --foreground: #f2f0ea;
+  --card: #151516;
+  --card-foreground: #f2f0ea;
+  --popover: #1a1a1c;
+  --popover-foreground: #f2f0ea;
+  --primary: #ece8e1;
+  --primary-foreground: #0c0c0d;
+  --secondary: #1e1e20;
+  --secondary-foreground: #f2f0ea;
+  --muted: #1e1e20;
+  --muted-foreground: #9c9992;
+  --accent: #222224;
+  --accent-foreground: #f2f0ea;
+  --destructive: #c48982;
+  --destructive-foreground: #0c0c0d;
+  --border: rgb(242 240 234 / 0.08);
+  --input: rgb(242 240 234 / 0.1);
+  --ring: #ece8e1;
+  --income: #8fad88;
+  --expense: #c48982;
+  --warn: #c4a574;
+  --overlay: rgb(0 0 0 / 0.6);
+  --elev-shadow: 0 0 0 1px rgb(242 240 234 / 0.08);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background: var(--background);
+    color: var(--foreground);
+  }
+
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    min-height: 100dvh;
+    line-height: 1.5;
+  }
+
+  h1, h2, h3 {
+    text-wrap: balance;
+    letter-spacing: -0.03em;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  input, textarea, select {
+    font: inherit;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@keyframes fos-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fos-enter {
+  animation: fos-enter 400ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.fos-enter-delay-1 { animation-delay: 40ms; }
+.fos-enter-delay-2 { animation-delay: 80ms; }
+.fos-enter-delay-3 { animation-delay: 120ms; }
+.fos-enter-delay-4 { animation-delay: 160ms; }
+
+.fos-ledger-mark {
+  display: grid;
+  gap: 7px;
+  width: 52px;
+}
+.fos-ledger-mark span {
+  display: block;
+  height: 2.5px;
+  border-radius: 999px;
+  background: var(--foreground);
+  transform-origin: left center;
+  animation: fos-ledger-line 1.15s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+.fos-ledger-mark span:nth-child(1) { width: 100%; }
+.fos-ledger-mark span:nth-child(2) { width: 68%; opacity: 0.7; animation-delay: 140ms; }
+.fos-ledger-mark span:nth-child(3) { width: 86%; opacity: 0.42; animation-delay: 280ms; }
+.fos-ledger-mark-sm {
+  width: 28px;
+  gap: 4px;
+}
+.fos-ledger-mark-sm span { height: 2px; }
+
+@keyframes fos-ledger-line {
+  0%, 100% { transform: scaleX(0.35); opacity: 0.35; }
+  50% { transform: scaleX(1); opacity: 1; }
+}
+
+.fos-login-pane {
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0 31px,
+      color-mix(in oklab, var(--foreground) 6%, transparent) 31px 32px
+    ),
+    linear-gradient(180deg, color-mix(in oklab, var(--foreground) 3.5%, var(--background)) 0%, var(--background) 100%);
+  border-right: 1px solid var(--border);
+}
+
+html {
+  --kb-inset: 0px;
+  --composer-tab: calc(3.5rem + env(safe-area-inset-bottom, 0px));
+}
+
+@media (min-width: 768px) {
+  html {
+    --composer-tab: 0px;
+  }
+}
+
+.fos-kb-open {
+  --composer-tab: 0px;
+}
+
+.fos-kb-open .fos-tabbar {
+  transform: translateY(110%);
+}
+
+.fos-tabbar {
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.fos-composer {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom)) !important;
+}
+
+.fos-kb-open .fos-composer {
+  padding-bottom: 0.5rem !important;
+  margin-bottom: 0 !important;
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
