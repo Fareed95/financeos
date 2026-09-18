@@ -62,6 +62,8 @@ export type Project = {
   totalCost: string;
   prepaid: string;
   duringTrip: string;
+  contributions: string;
+  netCost: string;
   remaining: string;
   txnCount: number;
 };
@@ -149,6 +151,8 @@ export type TripInsights = {
   prepaid: string;
   duringTrip: string;
   remaining: string;
+  contributions: string;
+  netCost: string;
   todaySpend: string;
   averageDaily: string;
   remainingDays: number;

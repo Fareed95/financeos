@@ -76,6 +76,8 @@ export function mapCategory(row: Record<string, unknown>): Category {
 export function mapProject(row: Record<string, unknown>): Project {
   const budget = asNumStr(row.budget);
   const totalCost = asNumStr(row.total_cost);
+  const contributions = asNumStr(row.contributions);
+  const netCost = subMoney(totalCost, contributions);
   return {
     id: asStr(row.id),
     name: asStr(row.name),
@@ -90,7 +92,9 @@ export function mapProject(row: Record<string, unknown>): Project {
     totalCost,
     prepaid: asNumStr(row.prepaid),
     duringTrip: asNumStr(row.during_trip),
-    remaining: subMoney(budget, totalCost),
+    contributions,
+    netCost,
+    remaining: subMoney(budget, netCost),
     txnCount: Number(row.txn_count ?? 0),
   };
 }
@@ -178,6 +182,7 @@ export const PROJECT_SELECT = `
   coalesce(s.total_cost, 0)::text as total_cost,
   coalesce(s.prepaid, 0)::text as prepaid,
   coalesce(s.during_trip, 0)::text as during_trip,
+  coalesce(s.contributions, 0)::text as contributions,
   coalesce(s.txn_count, 0)::int as txn_count
 `;
 
@@ -186,13 +191,14 @@ export const PROJECT_FROM = `
   left join lateral (
     select
       coalesce(sum(case when t.type = 'expense' then t.amount when t.type = 'refund' then -t.amount else 0 end), 0) as total_cost,
+      coalesce(sum(case when t.type = 'income' then t.amount else 0 end), 0) as contributions,
       coalesce(sum(case when t.type = 'expense' and t.is_prepaid then t.amount else 0 end), 0) as prepaid,
       coalesce(sum(case
         when t.type = 'expense' and not t.is_prepaid
           and (p.start_date is null or t.transaction_date >= p.start_date)
           and (p.end_date is null or t.transaction_date <= p.end_date)
         then t.amount else 0 end), 0) as during_trip,
-      count(*) filter (where t.type in ('expense', 'refund')) as txn_count
+      count(*) filter (where t.type in ('expense', 'refund', 'income')) as txn_count
     from transactions t
     where t.project_id = p.id and t.user_id = p.user_id and t.is_committed = true
   ) s on true

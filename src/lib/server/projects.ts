@@ -179,6 +179,8 @@ export const getProjectDetail = createServerFn({ method: "POST" })
         prepaid: project.prepaid,
         duringTrip: project.duringTrip,
         remaining,
+        contributions: project.contributions,
+        netCost: project.netCost,
         todaySpend,
         averageDaily,
         remainingDays,

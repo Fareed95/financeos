@@ -215,6 +215,18 @@
   border-right: 1px solid var(--border);
 }
 
+.fos-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: #0c0c0d;
+}
+.fos-splash-out {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 280ms ease;
+}
+
 html {
   --kb-inset: 0px;
   --composer-tab: calc(3.5rem + env(safe-area-inset-bottom, 0px));

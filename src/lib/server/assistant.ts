@@ -365,7 +365,8 @@ async function loadOverview(sql: Sql, userId: string) {
     categories,
     projects: projects.map(mapProject).map((p) => ({
       id: p.id, name: p.name, type: p.projectType, status: p.status,
-      budget: p.budget, spent: p.totalCost, remaining: p.remaining,
+      budget: p.budget, spent: p.totalCost, contributions: p.contributions,
+      netCost: p.netCost, remaining: p.remaining,
       start: p.startDate, end: p.endDate,
     })),
     budgets: budgets.map(mapBudget).map((b) => ({
@@ -606,6 +607,8 @@ async function runTool(
         dates: { start: project.startDate, end: project.endDate },
         budget: project.budget,
         total: project.totalCost,
+        contributions: project.contributions,
+        netCost: project.netCost,
         prepaid: project.prepaid,
         during: project.duringTrip,
         remaining: project.remaining,
@@ -713,6 +716,7 @@ Examples:
   "5k HDFC se UPI" → transfer, no Hinglish description.
 
 You can actually change their books with tools. When they ask to add/log/record spend, income, transfers, accounts, trips, or budgets — call the tool. Don't describe how to click the UI.
+Project remaining = budget − expenses + income tagged to that project (cost-share). Never raise the trip budget because someone paid them back — remaining already includes it. netCost = expenses − contributions.
 If an account/category/project is unambiguous from the snapshot (e.g. only one UPI), use it. If two could match, ask one short question instead of guessing.
 For deletes, only act when they clearly asked.
 Dates without a year are this year. "Aaj" / "today" = ${overview.today}. "Kal" is tomorrow unless they mean yesterday from context.

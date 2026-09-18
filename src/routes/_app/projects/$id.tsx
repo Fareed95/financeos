@@ -14,7 +14,7 @@ import { EmptyState } from "@/components/finance/empty-state";
 import { Button } from "@/components/ui/button";
 import { ProjectSheet } from "@/routes/_app/projects/index";
 import { formatLongDate, todayISO } from "@/lib/utils";
-import { formatMoney, isNegative, percentUsed } from "@/lib/money";
+import { formatMoney, isNegative, isZero, percentUsed } from "@/lib/money";
 import { DEFAULT_CATEGORIES, QUICK_TRIP_CATEGORIES } from "@/lib/constants";
 import { ArrowLeft, ArrowLeftRight } from "lucide-react";
 import {
@@ -108,7 +108,20 @@ function ProjectDetail() {
           percent={percentUsed(insights.totalCost, insights.budget)}
           currency={currency}
         />
+        {!isZero(insights.contributions) && (
+          <p className="mt-3 text-sm text-muted-foreground">
+            {formatMoney(insights.contributions, currency)} contributed · net cost{" "}
+            {formatMoney(insights.netCost, currency)}
+          </p>
+        )}
       </section>
+
+      {!isZero(insights.contributions) && (
+        <section className="grid grid-cols-2 gap-2">
+          <Metric label="Contributed" value={formatMoney(insights.contributions, currency)} />
+          <Metric label="Net cost" value={formatMoney(insights.netCost, currency)} />
+        </section>
+      )}
 
       {isTrip && (
         <section className="grid grid-cols-2 gap-2 md:grid-cols-4">
