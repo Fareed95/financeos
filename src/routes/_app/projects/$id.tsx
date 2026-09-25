@@ -14,7 +14,7 @@ import { EmptyState } from "@/components/finance/empty-state";
 import { Button } from "@/components/ui/button";
 import { ProjectSheet } from "@/routes/_app/projects/index";
 import { formatLongDate, todayISO } from "@/lib/utils";
-import { formatMoney, isNegative, isZero, percentUsed } from "@/lib/money";
+import { addMoney, formatMoney, isNegative, isZero, percentUsed, subMoney } from "@/lib/money";
 import { DEFAULT_CATEGORIES, QUICK_TRIP_CATEGORIES } from "@/lib/constants";
 import { ArrowLeft, ArrowLeftRight } from "lucide-react";
 import {
@@ -59,10 +59,14 @@ function ProjectDetail() {
   const { project, insights, transactions } = q.data;
   const isTrip = project.projectType === "trip";
   const remainingNegative = isNegative(insights.remaining);
-  const catTotal = insights.totalCost;
+  const catTotal = insights.categoryBreakdown.reduce((sum, row) => addMoney(sum, row.amount), "0.00");
+  const shownSpend =
+    project.collaboration === "collaborative"
+      ? subMoney(insights.mySpend, insights.myIncome)
+      : insights.totalCost;
 
   return (
-    <div className="space-y-6 pt-4 pb-8">
+    <div className="space-y-6 pt-4 pb-16">
       <div className="flex items-start justify-between gap-3">
         <div>
           <Link to="/projects" className="inline-flex items-center gap-1 text-xs text-muted-foreground">
@@ -85,8 +89,8 @@ function ProjectDetail() {
         <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
           <Metric label="Budget" value={formatMoney(insights.budget, currency)} />
           <Metric
-            label={project.collaboration === "collaborative" ? "Group spend" : "Total cost"}
-            value={formatMoney(insights.totalCost, currency)}
+            label={project.collaboration === "collaborative" ? "Spent" : "Total cost"}
+            value={formatMoney(shownSpend, currency)}
           />
           <Metric label="Prepaid" value={formatMoney(insights.prepaid, currency)} />
           <Metric label="During trip" value={formatMoney(insights.duringTrip, currency)} />
@@ -94,10 +98,7 @@ function ProjectDetail() {
       ) : (
         <div className="grid grid-cols-2 gap-2">
           <Metric label="Budget" value={formatMoney(project.budget, currency)} />
-          <Metric
-            label={project.collaboration === "collaborative" ? "Group spend" : "Spent"}
-            value={formatMoney(project.totalCost, currency)}
-          />
+          <Metric label="Spent" value={formatMoney(shownSpend, currency)} />
         </div>
       )}
 
@@ -110,9 +111,9 @@ function ProjectDetail() {
         </div>
         <BudgetBar
           className="mt-3"
-          spent={insights.totalCost}
+          spent={shownSpend}
           amount={insights.budget}
-          percent={percentUsed(insights.totalCost, insights.budget)}
+          percent={percentUsed(shownSpend, insights.budget)}
           currency={currency}
         />
         {!isZero(insights.contributions) && project.collaboration !== "collaborative" && (
@@ -123,9 +124,9 @@ function ProjectDetail() {
         )}
         {project.collaboration === "collaborative" && (
           <p className="mt-3 text-sm text-muted-foreground">
-            Your spend {formatMoney(insights.mySpend, currency)}
-            {!isZero(insights.myIncome) ? ` · ${formatMoney(insights.myIncome, currency)} in` : ""}. Remaining
-            uses your spend, not the whole group.
+            {isZero(insights.sharedSpend)
+              ? "This is what you spent on this project. It is not split with anyone."
+              : `${formatMoney(insights.sharedSpend, currency)} is shared with the group. The bar is your part of the budget.`}
           </p>
         )}
       </section>
@@ -173,7 +174,7 @@ function ProjectDetail() {
       {insights.categoryBreakdown.length > 0 && (
         <section className="space-y-3">
           <h2 className="text-sm font-medium">
-            {project.collaboration === "collaborative" ? "Group by category" : "By category"}
+            By category
           </h2>
           <div className="rounded-xl bg-card p-3 shadow-[var(--elev-shadow)]">
             {insights.categoryBreakdown.map((c) => {

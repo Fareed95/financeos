@@ -97,9 +97,9 @@ function Home() {
                 </div>
                 <BudgetBar
                   className="mt-3"
-                  spent={p.totalCost}
+                  spent={p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost}
                   amount={p.budget}
-                  percent={percentUsed(p.totalCost, p.budget)}
+                  percent={percentUsed(p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost, p.budget)}
                   currency={currency}
                 />
               </Link>

@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { ensureUser, ownedAccount, ownedCategory, ownedProject } from "@/lib/server/ensure";
 import { mapAccount, mapBudget, mapProject, mapTxn, PROJECT_FROM, PROJECT_SELECT, TXN_FROM, TXN_SELECT } from "@/lib/server/map";
+import { applyViewerProjectSpend } from "@/lib/server/collab";
 import { addMoney, parseMoney, subMoney } from "@/lib/money";
 import { addDaysISO, publicError } from "@/lib/utils";
 import type { Sql } from "@/lib/db";
@@ -355,6 +356,8 @@ async function loadOverview(sql: Sql, userId: string) {
     .filter((a) => a.isActive)
     .reduce((sum, a) => addMoney(sum, a.currentBalance), "0.00");
 
+  const mappedProjects = await applyViewerProjectSpend(sql, userId, projects.map(mapProject));
+
   return {
     today,
     month: { from: start, to: end, income: stats[0]?.income ?? "0.00", expense: stats[0]?.expense ?? "0.00" },
@@ -363,9 +366,11 @@ async function loadOverview(sql: Sql, userId: string) {
       id: a.id, name: a.name, type: a.type, balance: a.currentBalance, active: a.isActive,
     })),
     categories,
-    projects: projects.map(mapProject).map((p) => ({
+    projects: mappedProjects.map((p) => ({
       id: p.id, name: p.name, type: p.projectType, status: p.status,
-      budget: p.budget, spent: p.totalCost, contributions: p.contributions,
+      budget: p.budget,
+      spent: p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost,
+      contributions: p.contributions,
       netCost: p.netCost, remaining: p.remaining,
       start: p.startDate, end: p.endDate,
     })),
@@ -597,7 +602,9 @@ async function runTool(
       [proj.id, userId],
     );
     if (!rows[0]) throw new Error("Project not found");
-    const project = mapProject(rows[0]);
+    const [project] = await applyViewerProjectSpend(sql, userId, [mapProject(rows[0])]);
+    if (!project) throw new Error("Project not found");
+    const spent = project.collaboration === "collaborative" ? project.viewerSpend : project.totalCost;
     return {
       result: {
         id: project.id,
@@ -606,7 +613,7 @@ async function runTool(
         status: project.status,
         dates: { start: project.startDate, end: project.endDate },
         budget: project.budget,
-        total: project.totalCost,
+        total: spent,
         contributions: project.contributions,
         netCost: project.netCost,
         prepaid: project.prepaid,

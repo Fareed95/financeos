@@ -61,6 +61,8 @@ export type Project = {
   isDemo: boolean;
   collaboration: "personal" | "collaborative";
   totalCost: string;
+  /** What this viewer has used of the project budget. Personal projects match total cost. */
+  viewerSpend: string;
   prepaid: string;
   duringTrip: string;
   contributions: string;

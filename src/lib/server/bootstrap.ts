@@ -1,8 +1,9 @@
 import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { ensureUser } from "@/lib/server/ensure";
+import { applyViewerProjectSpend } from "@/lib/server/collab";
 import { mapAccount, mapBudget, mapCategory, mapProject, mapTxn, PROJECT_FROM, PROJECT_SELECT, TXN_FROM, TXN_SELECT } from "@/lib/server/map";
-import { addMoney, subMoney } from "@/lib/money";
+import { subMoney } from "@/lib/money";
 import { publicError } from "@/lib/utils";
 import type { Account, Bootstrap, Budget, Category, MonthStats, Profile, Project, Transaction } from "@/lib/types";
 
@@ -95,7 +96,7 @@ export const getBootstrap = createServerFn({ method: "POST" })
         profile,
         accounts: accountRows.map(mapAccount),
         categories: categoryRows.map(mapCategory),
-        projects: projectRows.map(mapProject),
+        projects: await applyViewerProjectSpend(sql, userId, projectRows.map(mapProject)),
         budgets: budgetRows.map(mapBudget),
         stats,
         recent: recentRows.map(mapTxn),

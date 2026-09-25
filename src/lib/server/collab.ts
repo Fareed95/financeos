@@ -3,7 +3,8 @@ import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { ensureUser, ownedAccount, ownedCategory } from "@/lib/server/ensure";
 import type { Sql } from "@/lib/db";
-import { fromCents, parseMoney, toCents } from "@/lib/money";
+import type { Project } from "@/lib/types";
+import { fromCents, parseMoney, subMoney, toCents } from "@/lib/money";
 import { publicError } from "@/lib/utils";
 import {
   allocateSplits,
@@ -75,17 +76,27 @@ export const listProjectMembers = createServerFn({ method: "POST" })
         where m.project_id = ${data.projectId} and m.status = 'active'
       `;
       const owner = await sql<{ id: string; full_name: string | null }>`
-        select pr.id, p.full_name from projects pr
+        select pr.user_id as id, p.full_name from projects pr
         left join profiles p on p.id = pr.user_id
         where pr.id = ${data.projectId}
       `;
-      const list = people.map((p) => ({
-        userId: p.user_id,
-        role: p.role,
-        name: p.full_name || "Member",
-      }));
-      if (owner[0] && !list.some((p) => p.userId === owner[0]!.id)) {
-        list.unshift({ userId: owner[0].id, role: "owner", name: owner[0].full_name || "Owner" });
+      const seen = new Set<string>();
+      const list: { userId: string; role: string; name: string }[] = [];
+      for (const person of people) {
+        if (seen.has(person.user_id)) continue;
+        seen.add(person.user_id);
+        list.push({
+          userId: person.user_id,
+          role: person.role,
+          name: person.full_name || "Member",
+        });
+      }
+      if (owner[0]) {
+        const existing = list.find((person) => person.userId === owner[0]!.id);
+        if (existing) existing.role = "owner";
+        else {
+          list.unshift({ userId: owner[0].id, role: "owner", name: owner[0].full_name || "Owner" });
+        }
       }
       return { role: gate.role, members: list, collaboration: gate.project.collaboration };
     } catch (err) {
@@ -436,6 +447,19 @@ export async function loadViewerSpend(sql: Sql, projectId: string, viewerId: str
       )
   `;
   const get = (kind: string) => rows.find((row) => row.kind === kind)?.amount ?? "0.00";
+  return packViewerSpend(get);
+}
+
+type ViewerSpend = {
+  personalSpend: string;
+  sharedSpend: string;
+  youPaid: string;
+  yourShare: string;
+  mySpend: string;
+  myIncome: string;
+};
+
+function packViewerSpend(get: (kind: string) => string): ViewerSpend {
   const personal = toCents(parseMoney(get("personal")));
   const share = toCents(parseMoney(get("share")));
   const priv = toCents(parseMoney(get("private_share")));
@@ -447,6 +471,96 @@ export async function loadViewerSpend(sql: Sql, projectId: string, viewerId: str
     mySpend: fromCents(personal + share + priv),
     myIncome: parseMoney(get("income")),
   };
+}
+
+const EMPTY_SPEND = (): ViewerSpend => ({
+  personalSpend: "0.00",
+  sharedSpend: "0.00",
+  youPaid: "0.00",
+  yourShare: "0.00",
+  mySpend: "0.00",
+  myIncome: "0.00",
+});
+
+export async function loadViewerSpendMany(sql: Sql, projectIds: string[], viewerId: string) {
+  const result = new Map<string, ViewerSpend>(projectIds.map((id) => [id, EMPTY_SPEND()]));
+  if (projectIds.length === 0) return result;
+  const idParams = projectIds.map((_, index) => `$${index + 1}`).join(", ");
+  const userParam = `$${projectIds.length + 1}`;
+  const rows = await sql.query<{ project_id: string; kind: string; amount: string }>(
+    `select project_id, kind, coalesce(sum(amount), 0)::numeric(14,2)::text as amount
+     from (
+       select project_id, 'personal' as kind, amount
+       from transactions
+       where project_id in (${idParams}) and user_id = ${userParam}
+         and type = 'expense' and is_committed = true and visibility = 'personal'
+       union all
+       select project_id, 'shared', amount
+       from transactions
+       where project_id in (${idParams}) and type = 'expense' and is_committed = true and visibility = 'shared'
+       union all
+       select project_id, 'paid', amount
+       from transactions
+       where project_id in (${idParams}) and type = 'expense' and is_committed = true
+         and visibility = 'shared' and paid_by_user_id = ${userParam}
+       union all
+       select t.project_id, 'share', es.allocated_amount
+       from expense_splits es
+       join transactions t on t.id = es.transaction_id
+       where t.project_id in (${idParams}) and t.visibility = 'shared' and t.type = 'expense'
+         and t.is_committed = true and es.user_id = ${userParam}
+       union all
+       select t.project_id, 'private_share', es.allocated_amount
+       from expense_splits es
+       join transactions t on t.id = es.transaction_id
+       where t.project_id in (${idParams}) and t.visibility = 'private' and t.type = 'expense'
+         and t.is_committed = true and es.user_id = ${userParam}
+       union all
+       select t.project_id, 'income', t.amount
+       from transactions t
+       where t.project_id in (${idParams}) and t.type = 'income' and t.is_committed = true
+         and (
+           (t.visibility = 'personal' and t.user_id = ${userParam})
+           or t.visibility = 'shared'
+           or (
+             t.visibility = 'private'
+             and (
+               t.user_id = ${userParam}
+               or t.paid_by_user_id = ${userParam}
+               or exists (
+                 select 1 from expense_splits es
+                 where es.transaction_id = t.id and es.user_id = ${userParam}
+               )
+             )
+           )
+         )
+     ) lines
+     group by project_id, kind`,
+    [...projectIds, viewerId],
+  );
+  const byProject = new Map<string, Map<string, string>>();
+  for (const row of rows) {
+    const kinds = byProject.get(row.project_id) ?? new Map<string, string>();
+    kinds.set(row.kind, row.amount);
+    byProject.set(row.project_id, kinds);
+  }
+  for (const [projectId, kinds] of byProject) {
+    result.set(projectId, packViewerSpend((kind) => kinds.get(kind) ?? "0.00"));
+  }
+  return result;
+}
+
+/** Collaborative cards use this viewer's spend, not shared-only group spend. Personal projects stay as they are. */
+export async function applyViewerProjectSpend(sql: Sql, userId: string, projects: Project[]): Promise<Project[]> {
+  const ids = projects.filter((project) => project.collaboration === "collaborative").map((project) => project.id);
+  if (ids.length === 0) return projects;
+  const spends = await loadViewerSpendMany(sql, ids, userId);
+  return projects.map((project) => {
+    if (project.collaboration !== "collaborative") return project;
+    const spend = spends.get(project.id) ?? EMPTY_SPEND();
+    const viewerSpend = subMoney(spend.mySpend, spend.myIncome);
+    return { ...project, viewerSpend, remaining: subMoney(project.budget, viewerSpend) };
+  });
 }
 
 export async function loadProjectBalances(sql: Sql, projectId: string, viewerId: string) {

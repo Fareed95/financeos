@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { ensureUser, ownedCategory, ownedProject } from "@/lib/server/ensure";
 import { mapProject, mapTxn, PROJECT_FROM, PROJECT_SELECT, TXN_FROM, TXN_SELECT } from "@/lib/server/map";
-import { loadViewerSpend } from "@/lib/server/collab";
+import { loadViewerSpend, applyViewerProjectSpend } from "@/lib/server/collab";
 import { cmpMoney, divideMoney, parseMoney, subMoney } from "@/lib/money";
 import { daysBetween, eachDayISO, publicError, todayISO } from "@/lib/utils";
 import type { DailySpend, Project, ProjectStatus, ProjectType, TripInsights } from "@/lib/types";
@@ -25,7 +25,7 @@ export const listProjects = createServerFn({ method: "POST" })
          order by case p.status when 'active' then 0 when 'planned' then 1 when 'completed' then 2 else 3 end, p.created_at desc`,
         [context.userId],
       );
-      return rows.map(mapProject);
+      return applyViewerProjectSpend(sql, context.userId, rows.map(mapProject));
     } catch (err) {
       publicError(err, "Couldn't load projects.");
     }
@@ -172,6 +172,7 @@ export const getProjectDetail = createServerFn({ method: "POST" })
           and (
             (${project.collaboration} = 'personal' and t.user_id = ${context.userId} and t.visibility = 'personal')
             or (${project.collaboration} = 'collaborative' and t.visibility = 'shared')
+            or (${project.collaboration} = 'collaborative' and t.visibility = 'personal' and t.user_id = ${context.userId})
           )
         group by t.category_id, c.name, c.icon
         order by sum(t.amount) desc
@@ -186,6 +187,7 @@ export const getProjectDetail = createServerFn({ method: "POST" })
           and (
             (${project.collaboration} = 'personal' and user_id = ${context.userId} and visibility = 'personal')
             or (${project.collaboration} = 'collaborative' and visibility = 'shared')
+            or (${project.collaboration} = 'collaborative' and visibility = 'personal' and user_id = ${context.userId})
           )
         group by transaction_date
         order by transaction_date asc

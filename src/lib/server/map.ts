@@ -91,6 +91,7 @@ export function mapProject(row: Record<string, unknown>): Project {
     isDemo: asBool(row.is_demo),
     collaboration: (asStr(row.collaboration) || "personal") as "personal" | "collaborative",
     totalCost,
+    viewerSpend: totalCost,
     prepaid: asNumStr(row.prepaid),
     duringTrip: asNumStr(row.during_trip),
     contributions,

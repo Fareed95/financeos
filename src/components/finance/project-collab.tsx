@@ -40,7 +40,13 @@ export function ProjectCollab({ projectId }: { projectId: string }) {
     refetchInterval: 20_000,
   });
 
-  const people = members.data?.members ?? [];
+  const rawPeople = members.data?.members ?? [];
+  const seen = new Set<string>();
+  const people = rawPeople.filter((person) => {
+    if (seen.has(person.userId)) return false;
+    seen.add(person.userId);
+    return true;
+  });
   const isOwner = members.data?.role === "owner";
   const invites = useQuery({
     queryKey: ["project-invites", projectId],
@@ -89,8 +95,8 @@ export function ProjectCollab({ projectId }: { projectId: string }) {
     <section className="space-y-3">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium">Group</h2>
-        <button type="button" className="text-xs text-muted-foreground" onClick={() => setMembersOpen(true)}>
-          Members
+        <button type="button" className="inline-flex h-11 items-center text-sm text-muted-foreground" onClick={() => setMembersOpen(true)}>
+          {isOwner ? "Invite" : "Members"}
         </button>
       </div>
       <div className="flex gap-2 overflow-x-auto pb-1">
@@ -99,7 +105,7 @@ export function ProjectCollab({ projectId }: { projectId: string }) {
             key={person.userId}
             type="button"
             onClick={() => setMembersOpen(true)}
-            className="flex shrink-0 items-center gap-2 rounded-full bg-card py-1 pr-3 pl-1 shadow-[var(--elev-shadow)]"
+            className="flex h-11 shrink-0 items-center gap-2 rounded-full bg-card py-1 pr-3 pl-1 shadow-[var(--elev-shadow)]"
           >
             <span className="grid size-8 place-items-center rounded-full bg-secondary text-xs font-medium">
               {(person.name.trim()[0] || "?").toUpperCase()}
@@ -107,62 +113,25 @@ export function ProjectCollab({ projectId }: { projectId: string }) {
             <span className="text-sm">{person.name}</span>
           </button>
         ))}
-        {isOwner && (
-          <button
-            type="button"
-            className="h-10 shrink-0 rounded-full bg-secondary px-3 text-sm"
-            onClick={() => setMembersOpen(true)}
-          >
-            + Invite
-          </button>
-        )}
       </div>
-      {spend && (
-        <div className="grid grid-cols-2 gap-2">
-          <Mini label="Shared spend" value={formatMoney(spend.sharedSpend, currency)} />
-          <Mini label="Your spend" value={formatMoney(spend.mySpend, currency)} />
+      {spend && !isZero(spend.sharedSpend) && (
+        <div className="grid grid-cols-3 gap-2">
+          <Mini label="Shared" value={formatMoney(spend.sharedSpend, currency)} />
           <Mini label="You paid" value={formatMoney(spend.youPaid, currency)} />
           <Mini label="Your share" value={formatMoney(spend.yourShare, currency)} />
-          <Mini label="Personal" value={formatMoney(spend.personalSpend, currency)} />
         </div>
       )}
-      <div className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
-        <p className="text-sm text-muted-foreground">
-          {settled ? "You're settled" : owed ? "You are owed" : "You owe"}
-        </p>
-        <p className={`mt-1 font-display text-2xl tabular ${!owed && !settled ? "text-expense" : ""}`}>
-          {formatMoney(isNegative(you) ? you.slice(1) : you, currency)}
-        </p>
-        <div className="mt-3 space-y-2">
-          {(balances.data?.payments ?? []).length === 0 ? (
-            <p className="text-sm text-muted-foreground">Nothing to settle.</p>
-          ) : (
-            balances.data?.payments.map((p) => (
-              <p key={`${p.fromUserId}-${p.toUserId}-${p.amount}`} className="text-sm">
-                {p.fromName} pays {p.toName} {formatMoney(p.amount, currency)}
-              </p>
-            ))
-          )}
-        </div>
-        {(balances.data?.privatePayments ?? []).length > 0 && (
-          <div className="mt-4 space-y-2 border-t border-border pt-3">
-            <p className="text-xs tracking-wide text-muted-foreground uppercase">Private, only the people involved</p>
-            {balances.data?.privatePayments.map((p) => (
-              <p key={`p-${p.fromUserId}-${p.toUserId}-${p.amount}`} className="text-sm">
-                {p.fromName} pays {p.toName} {formatMoney(p.amount, currency)}
-              </p>
-            ))}
-          </div>
-        )}
-        <div className="mt-4 flex gap-2">
-          <Button className="h-11 flex-1" onClick={() => setExpenseOpen(true)}>
-            Add expense
-          </Button>
-          <Button variant="secondary" className="h-11" onClick={() => setSettleOpen(true)}>
-            Settle up
-          </Button>
-        </div>
-      </div>
+      <BalanceCard
+        settled={settled}
+        owed={owed}
+        you={you}
+        currency={currency}
+        payments={balances.data?.payments ?? []}
+        privatePayments={balances.data?.privatePayments ?? []}
+        quiet={settled && (balances.data?.payments ?? []).length === 0 && (balances.data?.privatePayments ?? []).length === 0 && (!spend || isZero(spend.sharedSpend))}
+        onAdd={() => setExpenseOpen(true)}
+        onSettle={() => setSettleOpen(true)}
+      />
       {(balances.data?.history ?? []).length > 0 && (
         <div className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
           <p className="text-sm font-medium">Settlements</p>
@@ -534,6 +503,76 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
       <Label>{label}</Label>
       {children}
     </label>
+  );
+}
+
+function BalanceCard({
+  settled,
+  owed,
+  you,
+  currency,
+  payments,
+  privatePayments,
+  quiet,
+  onAdd,
+  onSettle,
+}: {
+  settled: boolean;
+  owed: boolean;
+  you: string;
+  currency: string;
+  payments: { fromUserId: string; toUserId: string; fromName: string; toName: string; amount: string }[];
+  privatePayments: { fromUserId: string; toUserId: string; fromName: string; toName: string; amount: string }[];
+  quiet: boolean;
+  onAdd: () => void;
+  onSettle: () => void;
+}) {
+  return (
+    <div className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
+      {quiet ? (
+        <p className="text-sm text-muted-foreground">
+          Nothing shared yet. Your own expenses still come out of the budget above.
+        </p>
+      ) : (
+        <>
+          <p className="text-sm text-muted-foreground">
+            {settled ? "You're settled" : owed ? "You are owed" : "You owe"}
+          </p>
+          <p className={`mt-1 font-display text-2xl tabular ${!owed && !settled ? "text-expense" : ""}`}>
+            {formatMoney(isNegative(you) ? you.slice(1) : you, currency)}
+          </p>
+          <div className="mt-3 space-y-2">
+            {payments.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Nothing to settle.</p>
+            ) : (
+              payments.map((payment) => (
+                <p key={`${payment.fromUserId}-${payment.toUserId}-${payment.amount}`} className="text-sm">
+                  {payment.fromName} pays {payment.toName} {formatMoney(payment.amount, currency)}
+                </p>
+              ))
+            )}
+          </div>
+          {privatePayments.length > 0 && (
+            <div className="mt-4 space-y-2 border-t border-border pt-3">
+              <p className="text-xs tracking-wide text-muted-foreground uppercase">Private, only the people involved</p>
+              {privatePayments.map((payment) => (
+                <p key={`p-${payment.fromUserId}-${payment.toUserId}-${payment.amount}`} className="text-sm">
+                  {payment.fromName} pays {payment.toName} {formatMoney(payment.amount, currency)}
+                </p>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+      <div className="mt-4 flex gap-2">
+        <Button className="h-11 flex-1" onClick={onAdd}>
+          Add expense
+        </Button>
+        <Button variant="secondary" className="h-11" onClick={onSettle}>
+          Settle up
+        </Button>
+      </div>
+    </div>
   );
 }
 
