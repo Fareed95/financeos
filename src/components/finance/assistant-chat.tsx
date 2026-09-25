@@ -15,8 +15,8 @@ import { toast } from "sonner";
 const SUGGESTIONS = [
   "Add ₹250 coffee on UPI",
   "Kitna spend hua this month?",
-  "Bangalore trip ka remaining?",
-  "Transfer ₹5,000 HDFC → UPI",
+  "Project pe kaun kitna owe karta hai?",
+  "Dinner ₹1,500 split equally",
 ];
 
 export function AssistantChat() {
@@ -31,7 +31,8 @@ export function AssistantChat() {
   const field = useRef<HTMLTextAreaElement>(null);
 
   const send = useMutation({
-    mutationFn: (message: string) => sendAssistantMessage({ data: { message } }),
+    mutationFn: (message: string) =>
+      sendAssistantMessage({ data: { message, origin: window.location.origin } }),
     onSuccess: async (res) => {
       await qc.invalidateQueries({ queryKey: ["assistant"] });
       if (res.mutated) await refresh();
@@ -79,7 +80,7 @@ export function AssistantChat() {
         <div className="min-w-0">
           <h1 className="font-display text-xl tracking-tight md:text-3xl">Ask</h1>
           <p className="truncate text-xs text-muted-foreground md:mt-1 md:text-sm">
-            Speak to the ledger. It posts for real.
+            Speak to the ledger. It posts, splits, and settles.
           </p>
         </div>
         {messages.length > 0 && (
@@ -198,7 +199,7 @@ function Welcome() {
         </div>
         <p className="mt-4 font-display text-2xl tracking-tight">Talk to your books</p>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          Hindi ya English — add spend, check a trip, move money. It writes to the ledger.
+          Hindi ya English — add spend, split a project, settle up. It writes to the ledger.
         </p>
       </div>
     </div>

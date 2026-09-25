@@ -1,12 +1,22 @@
 import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
-import { ensureUser, ownedAccount, ownedCategory, ownedProject } from "@/lib/server/ensure";
+import { ensureUser, ownedAccount, ownedCategory } from "@/lib/server/ensure";
 import { mapAccount, mapBudget, mapProject, mapTxn, PROJECT_FROM, PROJECT_SELECT, TXN_FROM, TXN_SELECT } from "@/lib/server/map";
-import { applyViewerProjectSpend } from "@/lib/server/collab";
-import { addMoney, parseMoney, subMoney } from "@/lib/money";
+import {
+  applyViewerProjectSpend,
+  assertNoSettledEdit,
+  issueInvite,
+  readGroupBalances,
+  readMembers,
+  writeSettlement,
+  writeSplitExpense,
+} from "@/lib/server/collab";
+import { addMoney, cmpMoney, parseMoney, subMoney } from "@/lib/money";
+import { matchMember } from "@/lib/member-match";
 import { addDaysISO, publicError } from "@/lib/utils";
 import type { Sql } from "@/lib/db";
 import type { AccountType, BudgetPeriod, ProjectStatus, ProjectType, TxnType } from "@/lib/types";
+import type { SplitMethod } from "@/lib/split";
 
 export type AssistantAction = { tool: string; summary: string; ok: boolean };
 export type AssistantChatMessage = {
@@ -80,7 +90,7 @@ const TOOLS = [
     type: "function",
     function: {
       name: "add_transaction",
-      description: "Record an expense, income, transfer, or refund. Prefer this when the user asks to add/log spend. Resolve account and category by name if ids are unknown.",
+      description: "Record an expense, income, transfer, or refund on your own books. A project tag here is personal spend: it counts on your budget and creates no debt. For a split between people, use add_split_expense.",
       parameters: {
         type: "object",
         properties: {
@@ -269,6 +279,92 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "get_split",
+      description:
+        "Who owes whom on a project, plus members and your spend. Use for 'kaun kitna owe karta hai', balances, or before settling.",
+      parameters: {
+        type: "object",
+        properties: { project: { type: "string", description: "Project id or name" } },
+        required: ["project"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "add_split_expense",
+      description:
+        "Split a project expense. shared = the group, private = only the named people, personal = only you (no debt). Do not use add_transaction for a split.",
+      parameters: {
+        type: "object",
+        properties: {
+          project: { type: "string" },
+          amount: { type: "string" },
+          account: { type: "string", description: "Account that paid, if you paid. Still required as the ledger account." },
+          category: { type: "string" },
+          description: { type: "string", description: "Short English title. Translate Hindi." },
+          date: { type: "string", description: "YYYY-MM-DD. Default today IST." },
+          visibility: { type: "string", enum: ["shared", "personal", "private"] },
+          paid_by: { type: "string", description: "Member name, or me. Default me." },
+          method: { type: "string", enum: ["equal", "exact", "percentage", "shares"] },
+          participants: {
+            type: "array",
+            description: "People in the split. Omit to include every member. value is the exact amount, percent, or shares.",
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string" },
+                value: { type: "string" },
+              },
+              required: ["name"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["project", "amount", "account", "description"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "settle_project",
+      description:
+        "Record a real payment that clears a shared debt. Omit amount to settle the full suggested payment. Never invent a larger amount. Does not clear private debts.",
+      parameters: {
+        type: "object",
+        properties: {
+          project: { type: "string" },
+          from: { type: "string", description: "Who paid. Name or me. Omit to use the suggested payment." },
+          to: { type: "string", description: "Who received the money." },
+          amount: { type: "string" },
+          method: { type: "string", enum: ["upi", "cash", "bank", "other"] },
+          note: { type: "string", description: "Short English note." },
+        },
+        required: ["project"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "invite_to_project",
+      description:
+        "Create a 14-day invite link and turn the project into a shared one. Only the owner. Use when they want to split with someone who is not a member yet.",
+      parameters: {
+        type: "object",
+        properties: { project: { type: "string" } },
+        required: ["project"],
+        additionalProperties: false,
+      },
+    },
+  },
 ] as const;
 
 async function resolveByName(
@@ -300,6 +396,74 @@ async function resolveByName(
   throw new Error(`No ${table.slice(0, -1)} named "${key}". Create it first or pick from the snapshot.`);
 }
 
+async function resolveAccessibleProject(sql: Sql, userId: string, idOrName: string) {
+  const key = idOrName.trim();
+  if (!key) throw new Error("Which project?");
+  const rows = await sql.query<{ id: string; name: string }>(
+    `select p.id, p.name from projects p
+     where (
+       p.user_id = $1 or exists (
+         select 1 from project_members m
+         where m.project_id = p.id and m.user_id = $1 and m.status = 'active'
+       )
+     )
+     and (p.id = $2 or lower(p.name) = lower($2))
+     limit 2`,
+    [userId, key],
+  );
+  if (rows.length === 1) return rows[0]!;
+  if (rows.length > 1) throw new Error(`Multiple projects match "${key}". Ask which one.`);
+  const fuzzy = await sql.query<{ id: string; name: string }>(
+    `select p.id, p.name from projects p
+     where (
+       p.user_id = $1 or exists (
+         select 1 from project_members m
+         where m.project_id = p.id and m.user_id = $1 and m.status = 'active'
+       )
+     )
+     and p.name ilike $2
+     limit 5`,
+    [userId, `%${key}%`],
+  );
+  if (fuzzy.length === 1) return fuzzy[0]!;
+  if (fuzzy.length > 1) {
+    throw new Error(`Multiple projects match "${key}": ${fuzzy.map((row) => row.name).join(", ")}. Ask which one.`);
+  }
+  throw new Error(`No project named "${key}".`);
+}
+
+function parseParticipants(raw: unknown): { name: string; value: string }[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      if (typeof item === "string") return { name: item.trim(), value: "1" };
+      if (!item || typeof item !== "object") return { name: "", value: "1" };
+      const rec = item as Record<string, unknown>;
+      const name = typeof rec.name === "string" ? rec.name.trim() : "";
+      const value =
+        typeof rec.value === "string" || typeof rec.value === "number" ? String(rec.value).trim() : "1";
+      return { name, value: value || "1" };
+    })
+    .filter((part) => part.name);
+}
+
+function safeOrigin(raw: string) {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    return url.origin;
+  } catch {
+    return "";
+  }
+}
+
+const PROJECT_ACCESS = `
+  p.user_id = $1 or exists (
+    select 1 from project_members m
+    where m.project_id = p.id and m.user_id = $1 and m.status = 'active'
+  )
+`;
+
 async function loadOverview(sql: Sql, userId: string) {
   const today = todayIST();
   const { start, end } = monthBounds(today);
@@ -316,7 +480,8 @@ async function loadOverview(sql: Sql, userId: string) {
     `,
     sql.query<Record<string, unknown>>(
       `select ${PROJECT_SELECT} ${PROJECT_FROM}
-       where p.user_id = $1 and p.status in ('planned','active','completed')
+       where (${PROJECT_ACCESS})
+         and p.status in ('planned','active','completed')
        order by case p.status when 'active' then 0 when 'planned' then 1 else 2 end, p.created_at desc`,
       [userId],
     ),
@@ -357,6 +522,42 @@ async function loadOverview(sql: Sql, userId: string) {
     .reduce((sum, a) => addMoney(sum, a.currentBalance), "0.00");
 
   const mappedProjects = await applyViewerProjectSpend(sql, userId, projects.map(mapProject));
+  const projectCards = await Promise.all(
+    mappedProjects.map(async (project) => {
+      const spent = project.collaboration === "collaborative" ? project.viewerSpend : project.totalCost;
+      const card: Record<string, unknown> = {
+        id: project.id,
+        name: project.name,
+        type: project.projectType,
+        status: project.status,
+        collaboration: project.collaboration,
+        budget: project.budget,
+        spent,
+        contributions: project.contributions,
+        netCost: project.netCost,
+        remaining: project.remaining,
+        start: project.startDate,
+        end: project.endDate,
+      };
+      if (project.collaboration !== "collaborative") return card;
+      try {
+        const [group, balances] = await Promise.all([
+          readMembers(sql, userId, project.id),
+          readGroupBalances(sql, userId, project.id),
+        ]);
+        card.members = group.members.map((member) => member.name);
+        card.you = balances.you;
+        card.payments = balances.payments.map((payment) => ({
+          from: payment.fromName,
+          to: payment.toName,
+          amount: payment.amount,
+        }));
+      } catch {
+        card.members = [];
+      }
+      return card;
+    }),
+  );
 
   return {
     today,
@@ -366,14 +567,7 @@ async function loadOverview(sql: Sql, userId: string) {
       id: a.id, name: a.name, type: a.type, balance: a.currentBalance, active: a.isActive,
     })),
     categories,
-    projects: mappedProjects.map((p) => ({
-      id: p.id, name: p.name, type: p.projectType, status: p.status,
-      budget: p.budget,
-      spent: p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost,
-      contributions: p.contributions,
-      netCost: p.netCost, remaining: p.remaining,
-      start: p.startDate, end: p.endDate,
-    })),
+    projects: projectCards,
     budgets: budgets.map(mapBudget).map((b) => ({
       id: b.id, name: b.name, amount: b.amount, spent: b.spent, remaining: b.remaining,
       period: b.period, category: b.categoryName,
@@ -390,6 +584,7 @@ async function runTool(
   userId: string,
   name: string,
   rawArgs: Record<string, unknown>,
+  origin = "",
 ): Promise<{ result: unknown; summary: string; mutated: boolean }> {
   const str = (k: string) => {
     const v = rawArgs[k];
@@ -421,8 +616,23 @@ async function runTool(
       if (cat) add(cat.id, "t.category_id = ?");
     }
     if (str("project")) {
-      const proj = await resolveByName(sql, "projects", userId, str("project"));
-      if (proj) add(proj.id, "t.project_id = ?");
+      const proj = await resolveAccessibleProject(sql, userId, str("project"));
+      clauses[0] = `(
+        t.visibility = 'shared'
+        or (t.visibility = 'personal' and t.user_id = $1)
+        or (
+          t.visibility = 'private'
+          and (
+            t.user_id = $1
+            or t.paid_by_user_id = $1
+            or exists (
+              select 1 from expense_splits es
+              where es.transaction_id = t.id and es.user_id = $1
+            )
+          )
+        )
+      )`;
+      add(proj.id, "t.project_id = ?");
     }
     if (str("search")) {
       const q = `%${str("search")}%`;
@@ -440,7 +650,8 @@ async function runTool(
     );
     const items = rows.map(mapTxn).map((t) => ({
       id: t.id, type: t.type, amount: t.amount, date: t.transactionDate,
-      description: t.description, account: t.accountName, category: t.categoryName, project: t.projectName,
+      description: t.description, account: t.accountName, category: t.categoryName,
+      project: t.projectName, visibility: t.visibility, paidBy: t.paidByName,
     }));
     return { result: { count: items.length, items }, summary: `Found ${items.length} transactions`, mutated: false };
   }
@@ -457,6 +668,12 @@ async function runTool(
       );
       if (!rows[0]) throw new Error("Transaction not found");
       existing = mapTxn(rows[0]);
+    }
+    if (isUpdate) {
+      if ((existing?.visibility ?? "personal") !== "personal") {
+        throw new Error("Shared and private splits can't be edited. Add a new expense instead.");
+      }
+      await assertNoSettledEdit(sql, id);
     }
     const type = (str("type") || existing?.type || "expense") as TxnType;
     if (!["expense", "income", "transfer", "refund"].includes(type)) throw new Error("Invalid transaction type");
@@ -478,11 +695,8 @@ async function runTool(
     if (Object.hasOwn(rawArgs, "project")) {
       if (!str("project")) projectId = null;
       else {
-        const proj = await resolveByName(sql, "projects", userId, str("project"));
-        if (proj) {
-          if (!(await ownedProject(sql, userId, proj.id))) throw new Error("Project not found");
-          projectId = proj.id;
-        }
+        const proj = await resolveAccessibleProject(sql, userId, str("project"));
+        projectId = proj.id;
       }
     }
     let counterparty: string | null = existing?.counterpartyAccountId ?? null;
@@ -533,6 +747,11 @@ async function runTool(
 
   if (name === "delete_transaction") {
     const id = str("id");
+    const existing = await sql<{ id: string }>`
+      select id from transactions where id = ${id} and user_id = ${userId}
+    `;
+    if (!existing[0]) throw new Error("Transaction not found");
+    await assertNoSettledEdit(sql, id);
     const rows = await sql<{ id: string }>`
       delete from transactions where id = ${id} and user_id = ${userId} returning id
     `;
@@ -595,32 +814,52 @@ async function runTool(
   }
 
   if (name === "get_project") {
-    const proj = await resolveByName(sql, "projects", userId, str("project"));
-    if (!proj) throw new Error("Project not found");
+    const proj = await resolveAccessibleProject(sql, userId, str("project"));
     const rows = await sql.query<Record<string, unknown>>(
-      `select ${PROJECT_SELECT} ${PROJECT_FROM} where p.id = $1 and p.user_id = $2`,
-      [proj.id, userId],
+      `select ${PROJECT_SELECT} ${PROJECT_FROM}
+       where p.id = $2 and (${PROJECT_ACCESS})`,
+      [userId, proj.id],
     );
     if (!rows[0]) throw new Error("Project not found");
     const [project] = await applyViewerProjectSpend(sql, userId, [mapProject(rows[0])]);
     if (!project) throw new Error("Project not found");
     const spent = project.collaboration === "collaborative" ? project.viewerSpend : project.totalCost;
+    const result: Record<string, unknown> = {
+      id: project.id,
+      name: project.name,
+      type: project.projectType,
+      status: project.status,
+      collaboration: project.collaboration,
+      dates: { start: project.startDate, end: project.endDate },
+      budget: project.budget,
+      total: spent,
+      contributions: project.contributions,
+      netCost: project.netCost,
+      prepaid: project.prepaid,
+      during: project.duringTrip,
+      remaining: project.remaining,
+      txnCount: project.txnCount,
+    };
+    if (project.collaboration === "collaborative") {
+      const [group, balances] = await Promise.all([
+        readMembers(sql, userId, project.id),
+        readGroupBalances(sql, userId, project.id),
+      ]);
+      result.members = group.members.map((member) => ({ name: member.name, role: member.role }));
+      result.you = balances.you;
+      result.payments = balances.payments.map((payment) => ({
+        from: payment.fromName,
+        to: payment.toName,
+        amount: payment.amount,
+      }));
+      result.privatePayments = balances.privatePayments.map((payment) => ({
+        from: payment.fromName,
+        to: payment.toName,
+        amount: payment.amount,
+      }));
+    }
     return {
-      result: {
-        id: project.id,
-        name: project.name,
-        type: project.projectType,
-        status: project.status,
-        dates: { start: project.startDate, end: project.endDate },
-        budget: project.budget,
-        total: spent,
-        contributions: project.contributions,
-        netCost: project.netCost,
-        prepaid: project.prepaid,
-        during: project.duringTrip,
-        remaining: project.remaining,
-        txnCount: project.txnCount,
-      },
+      result,
       summary: `Checked ${project.name}`,
       mutated: false,
     };
@@ -705,6 +944,148 @@ async function runTool(
     };
   }
 
+  if (name === "get_split" || name === "add_split_expense" || name === "settle_project" || name === "invite_to_project") {
+    const project = await resolveAccessibleProject(sql, userId, str("project"));
+    if (name === "invite_to_project") {
+      const invite = await issueInvite(sql, userId, project.id);
+      const url = origin ? `${origin}${invite.path}` : invite.path;
+      return {
+        result: { project: project.name, url, path: invite.path, expiresInDays: 14 },
+        summary: `Invite link for ${project.name}`,
+        mutated: true,
+      };
+    }
+    if (name === "get_split") {
+      const [group, balances] = await Promise.all([
+        readMembers(sql, userId, project.id),
+        readGroupBalances(sql, userId, project.id),
+      ]);
+      return {
+        result: {
+          project: group.projectName,
+          collaboration: group.collaboration,
+          yourRole: group.role,
+          you: balances.you,
+          youMeaning: "Positive means you are owed. Negative means you owe. Zero means settled.",
+          members: group.members.map((member) => ({ name: member.name, role: member.role })),
+          payments: balances.payments.map((payment) => ({
+            from: payment.fromName,
+            to: payment.toName,
+            amount: payment.amount,
+          })),
+          privatePayments: balances.privatePayments.map((payment) => ({
+            from: payment.fromName,
+            to: payment.toName,
+            amount: payment.amount,
+          })),
+          spend: balances.spend,
+        },
+        summary: `Split on ${group.projectName}`,
+        mutated: false,
+      };
+    }
+    if (name === "add_split_expense") {
+      const visibility = (str("visibility") || "shared") as "shared" | "personal" | "private";
+      if (!["shared", "personal", "private"].includes(visibility)) throw new Error("Visibility must be shared, personal, or private");
+      const method = (str("method") || "equal") as SplitMethod;
+      if (!["equal", "exact", "percentage", "shares"].includes(method)) throw new Error("Split method must be equal, exact, percentage, or shares");
+      const acc = await resolveByName(sql, "accounts", userId, str("account"));
+      if (!acc) throw new Error("Choose an account");
+      let categoryId: string | null = null;
+      if (str("category")) {
+        const cat = await resolveByName(sql, "categories", userId, str("category"));
+        if (cat) categoryId = cat.id;
+      }
+      const group = await readMembers(sql, userId, project.id);
+      const paidBy = matchMember(group.members, str("paid_by") || "me", userId);
+      const requested = parseParticipants(rawArgs.participants);
+      const chosen = visibility === "personal"
+        ? []
+        : (requested.length > 0 ? requested : group.members.map((member) => ({ name: member.name, value: "1" }))).map((part) => {
+            const member = matchMember(group.members, part.name, userId);
+            return { userId: member.userId, value: part.value || "1", name: member.name };
+          });
+      if (visibility !== "personal" && chosen.length === 0) throw new Error("Pick who shares this expense");
+      const saved = await writeSplitExpense(sql, userId, {
+        projectId: project.id,
+        accountId: acc.id,
+        categoryId,
+        amount: str("amount"),
+        description: str("description"),
+        transactionDate: str("date") || todayIST(),
+        visibility,
+        paidByUserId: paidBy.userId,
+        method,
+        parts: chosen.map((part) => ({ userId: part.userId, value: part.value })),
+      });
+      const nameOf = new Map(group.members.map((member) => [member.userId, member.name]));
+      const balances = await readGroupBalances(sql, userId, project.id);
+      return {
+        result: {
+          id: saved.id,
+          visibility,
+          paidBy: paidBy.name,
+          splits: saved.allocations.map((row) => ({ name: nameOf.get(row.userId) || "Member", amount: row.allocated })),
+          payments: balances.payments.map((payment) => ({
+            from: payment.fromName,
+            to: payment.toName,
+            amount: payment.amount,
+          })),
+        },
+        summary: `Split ${str("description") || "expense"} ₹${parseMoney(str("amount"))} on ${project.name}`,
+        mutated: true,
+      };
+    }
+    const [group, balances] = await Promise.all([
+      readMembers(sql, userId, project.id),
+      readGroupBalances(sql, userId, project.id),
+    ]);
+    let payment = balances.payments.find((row) => row.fromUserId === userId || row.toUserId === userId) ?? balances.payments[0];
+    if (str("from") || str("to")) {
+      const from = matchMember(group.members, str("from") || "me", userId);
+      const to = matchMember(group.members, str("to") || "me", userId);
+      const found = balances.payments.find((row) => row.fromUserId === from.userId && row.toUserId === to.userId);
+      if (!found) {
+        const priv = balances.privatePayments.find((row) => row.fromUserId === from.userId && row.toUserId === to.userId);
+        if (priv) throw new Error(`${priv.fromName} owes ${priv.toName} ₹${priv.amount} privately. A group settlement does not clear that.`);
+        throw new Error(`${from.name} does not owe ${to.name} on this project.`);
+      }
+      payment = found;
+    }
+    if (!payment) {
+      if (balances.privatePayments.length > 0) {
+        throw new Error("Only a private debt is open. Group settle does not clear it.");
+      }
+      throw new Error("Nothing to settle on this project.");
+    }
+    const amount = str("amount") ? parseMoney(str("amount")) : payment.amount;
+    if (cmpMoney(amount, payment.amount) > 0) {
+      throw new Error(`That's more than the ₹${payment.amount} owed. Settle ${payment.amount} or less.`);
+    }
+    const method = (str("method") || "upi") as "upi" | "cash" | "bank" | "other";
+    if (!["upi", "cash", "bank", "other"].includes(method)) throw new Error("Payment method must be upi, cash, bank, or other");
+    await writeSettlement(sql, userId, {
+      projectId: project.id,
+      fromUserId: payment.fromUserId,
+      toUserId: payment.toUserId,
+      amount,
+      paymentMethod: method,
+      note: str("note") || null,
+    });
+    const after = await readGroupBalances(sql, userId, project.id);
+    return {
+      result: {
+        from: payment.fromName,
+        to: payment.toName,
+        amount,
+        method,
+        remainingPayments: after.payments.map((row) => ({ from: row.fromName, to: row.toName, amount: row.amount })),
+      },
+      summary: `${payment.fromName} paid ${payment.toName} ₹${amount}`,
+      mutated: true,
+    };
+  }
+
   throw new Error(`Unknown tool ${name}`);
 }
 
@@ -722,8 +1103,17 @@ Examples:
   "aaj 250 coffee UPI pe" → description "Coffee".
   "5k HDFC se UPI" → transfer, no Hinglish description.
 
-You can actually change their books with tools. When they ask to add/log/record spend, income, transfers, accounts, trips, or budgets — call the tool. Don't describe how to click the UI.
-Project remaining = budget − expenses + income tagged to that project (cost-share). Never raise the trip budget because someone paid them back — remaining already includes it. netCost = expenses − contributions.
+You can actually change their books with tools. When they ask to add/log/record spend, income, transfers, accounts, trips, budgets, splits, invites, or settlements — call the tool. Don't describe how to click the UI.
+On a personal project, remaining = budget − expenses + income tagged to that project. Never raise the budget because someone paid them back.
+On a collaborative project, remaining and spent in the snapshot are YOUR spend (personal expenses plus your share), not the whole group. you > 0 means you are owed. you < 0 means you owe.
+
+SPLITTING
+- Your own project expense, with no one else sharing it: add_transaction. It reduces your remaining and creates no debt.
+- A cost split with other members: add_split_expense. Default visibility shared and method equal. Use exact, percentage, or shares only when they gave numbers. paid_by is me if they paid.
+- private is only the named people and stays out of the group balance.
+- Participants must already be members, matched from the snapshot. If the other person is not a member, invite_to_project and give them the url. Do not invent people. Do not split with only yourself.
+- get_split answers who pays whom. When they ask to settle, call settle_project in the same turn. If they name more than the debt, omit amount so only the owed payment is recorded, then say you recorded that and not the extra. Never only promise to settle. Private debts are not cleared by settle_project.
+- After a split or settlement, trust the tool result. Do not invent a different share.
 If an account/category/project is unambiguous from the snapshot (e.g. only one UPI), use it. If two could match, ask one short question instead of guessing.
 For deletes, only act when they clearly asked.
 Dates without a year are this year. "Aaj" / "today" = ${overview.today}. "Kal" is tomorrow unless they mean yesterday from context.
@@ -828,7 +1218,7 @@ export const clearAssistantHistory = createServerFn({ method: "POST" })
 
 export const sendAssistantMessage = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((data: { message: string }) => data)
+  .validator((data: { message: string; origin?: string }) => data)
   .handler(async ({ context, data }): Promise<{
     message: AssistantChatMessage;
     mutated: boolean;
@@ -883,7 +1273,7 @@ export const sendAssistantMessage = createServerFn({ method: "POST" })
           const fn = call.function?.name ?? "";
           const args = parseArgs(call.function?.arguments ?? "");
           try {
-            const out = await runTool(sql, userId, fn, args);
+            const out = await runTool(sql, userId, fn, args, safeOrigin(data.origin ?? ""));
             mutated = mutated || out.mutated;
             actions.push({ tool: fn, summary: out.summary, ok: true });
             messages.push({

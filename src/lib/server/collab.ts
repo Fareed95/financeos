@@ -45,6 +45,233 @@ async function memberIds(sql: Sql, projectId: string, ownerId: string) {
   return ids;
 }
 
+export async function readMembers(sql: Sql, userId: string, projectId: string) {
+  const gate = await access(sql, userId, projectId);
+  if (!gate) throw new Error("Project not found");
+  const people = await sql<{ user_id: string; role: string; full_name: string | null }>`
+    select m.user_id, m.role, p.full_name
+    from project_members m
+    left join profiles p on p.id = m.user_id
+    where m.project_id = ${projectId} and m.status = 'active'
+  `;
+  const owner = await sql<{ id: string; full_name: string | null }>`
+    select pr.user_id as id, p.full_name from projects pr
+    left join profiles p on p.id = pr.user_id
+    where pr.id = ${projectId}
+  `;
+  const seen = new Set<string>();
+  const list: { userId: string; role: string; name: string }[] = [];
+  for (const person of people) {
+    if (seen.has(person.user_id)) continue;
+    seen.add(person.user_id);
+    list.push({
+      userId: person.user_id,
+      role: person.role,
+      name: person.full_name || "Member",
+    });
+  }
+  if (owner[0]) {
+    const existing = list.find((person) => person.userId === owner[0]!.id);
+    if (existing) existing.role = "owner";
+    else list.unshift({ userId: owner[0].id, role: "owner", name: owner[0].full_name || "Owner" });
+  }
+  return {
+    role: gate.role,
+    members: list,
+    collaboration: gate.project.collaboration,
+    projectName: gate.project.name,
+  };
+}
+
+export async function issueInvite(sql: Sql, userId: string, projectId: string) {
+  const gate = await access(sql, userId, projectId);
+  if (!gate || gate.role !== "owner") throw new Error("Only the owner can invite");
+  await sql`
+    update projects set collaboration = 'collaborative', updated_at = now()
+    where id = ${projectId}
+  `;
+  const ownerRow = await sql<{ id: string }>`
+    select id from project_members
+    where project_id = ${projectId} and user_id = ${gate.project.user_id} and status = 'active'
+  `;
+  if (!ownerRow[0]) {
+    await sql`
+      insert into project_members (id, project_id, user_id, role, status)
+      values (${crypto.randomUUID()}, ${projectId}, ${gate.project.user_id}, 'owner', 'active')
+    `;
+  }
+  const token = randomBytes(24).toString("base64url");
+  const id = crypto.randomUUID();
+  await sql`
+    insert into project_invites (id, project_id, token_hash, invited_by, expires_at)
+    values (
+      ${id}, ${projectId}, ${hashToken(token)}, ${userId},
+      now() + interval '14 days'
+    )
+  `;
+  return { token, path: `/invite/${token}` };
+}
+
+export async function writeSplitExpense(
+  sql: Sql,
+  userId: string,
+  data: {
+    projectId: string;
+    accountId: string;
+    categoryId?: string | null;
+    amount: string;
+    description?: string | null;
+    transactionDate: string;
+    visibility: "shared" | "personal" | "private";
+    paidByUserId?: string;
+    method?: SplitMethod;
+    parts?: { userId: string; value: string }[];
+  },
+) {
+  const gate = await access(sql, userId, data.projectId);
+  if (!gate) throw new Error("Project not found");
+  if (gate.project.collaboration !== "collaborative" && data.visibility !== "personal") {
+    throw new Error("Invite someone before splitting this project");
+  }
+  const amount = parseMoney(data.amount);
+  if (amount.startsWith("-") || amount === "0.00") throw new Error("Amount must be greater than zero");
+  const account = await ownedAccount(sql, userId, data.accountId);
+  if (!account) throw new Error("Choose a valid account");
+  if (data.categoryId) {
+    const cat = await ownedCategory(sql, userId, data.categoryId);
+    if (!cat) throw new Error("Choose a valid category");
+  }
+  const people = await memberIds(sql, data.projectId, gate.project.user_id);
+  const paidBy = data.visibility === "personal" ? userId : data.paidByUserId || userId;
+  if (!people.has(paidBy)) throw new Error("Choose who paid");
+  const affects = paidBy === userId;
+  const id = crypto.randomUUID();
+  let allocations: { userId: string; allocated: string }[] = [];
+  if (data.visibility !== "personal") {
+    const parts = (data.parts ?? []).filter((part) => part.userId);
+    if (parts.some((part) => !people.has(part.userId))) throw new Error("Someone in the split isn't on this project");
+    allocations = allocateSplits(amount, data.method ?? "equal", parts);
+  }
+  await sql`
+    insert into transactions (
+      id, user_id, account_id, category_id, project_id, type, amount,
+      transaction_date, description, is_committed, visibility, paid_by_user_id, affects_ledger
+    ) values (
+      ${id}, ${userId}, ${data.accountId}, ${data.categoryId ?? null}, ${data.projectId},
+      'expense', ${amount}::numeric, ${data.transactionDate}::date, ${data.description ?? null},
+      true, ${data.visibility}, ${paidBy}, ${affects}
+    )
+  `;
+  const method = data.method ?? "equal";
+  for (const row of allocations) {
+    const part = (data.parts ?? []).find((item) => item.userId === row.userId);
+    await sql`
+      insert into expense_splits (id, transaction_id, user_id, split_method, share_value, allocated_amount)
+      values (
+        ${crypto.randomUUID()}, ${id}, ${row.userId}, ${method},
+        ${part?.value || "1"}::numeric, ${row.allocated}::numeric
+      )
+    `;
+  }
+  return { id, allocations };
+}
+
+export async function writeSettlement(
+  sql: Sql,
+  userId: string,
+  data: {
+    projectId: string;
+    fromUserId: string;
+    toUserId: string;
+    amount: string;
+    paymentMethod?: "upi" | "cash" | "bank" | "other";
+    note?: string | null;
+  },
+) {
+  const gate = await access(sql, userId, data.projectId);
+  if (!gate) throw new Error("Project not found");
+  const people = await memberIds(sql, data.projectId, gate.project.user_id);
+  if (!people.has(data.fromUserId) || !people.has(data.toUserId)) throw new Error("Pick people on this project");
+  if (data.fromUserId === data.toUserId) throw new Error("Settlement needs two people");
+  const amount = parseMoney(data.amount);
+  if (amount.startsWith("-") || amount === "0.00") throw new Error("Amount must be greater than zero");
+  const involved = data.fromUserId === userId || data.toUserId === userId || gate.role === "owner";
+  if (!involved) throw new Error("You can only settle a payment you're part of");
+  const id = crypto.randomUUID();
+  try {
+    await sql`
+      insert into settlements (
+        id, project_id, from_user_id, to_user_id, amount, payment_method, note,
+        status, created_by, completed_at
+      ) values (
+        ${id}, ${data.projectId}, ${data.fromUserId}, ${data.toUserId}, ${amount}::numeric,
+        ${data.paymentMethod ?? "upi"}, ${data.note ?? null}, 'completed', ${userId}, now()
+      )
+    `;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "";
+    if (message.includes("settlements_pending")) throw new Error("That settlement is already pending");
+    throw err;
+  }
+  return { id, amount };
+}
+
+export async function readGroupBalances(sql: Sql, userId: string, projectId: string) {
+  const names = await sql<{ user_id: string; full_name: string | null }>`
+    select m.user_id, p.full_name from project_members m
+    left join profiles p on p.id = m.user_id
+    where m.project_id = ${projectId} and m.status = 'active'
+    union
+    select pr.user_id, p.full_name from projects pr
+    left join profiles p on p.id = pr.user_id
+    where pr.id = ${projectId}
+  `;
+  const nameOf = new Map(names.map((row) => [row.user_id, row.full_name || "Member"]));
+  const { plan, mine, privatePlan } = await loadProjectBalances(sql, projectId, userId);
+  const spend = await loadViewerSpend(sql, projectId, userId);
+  const history = await sql<{
+    id: string;
+    from_user_id: string;
+    to_user_id: string;
+    amount: string;
+    payment_method: string;
+    note: string | null;
+    status: string;
+    created_at: string;
+  }>`
+    select id, from_user_id, to_user_id, amount::text as amount, payment_method, note, status,
+           created_at::text as created_at
+    from settlements
+    where project_id = ${projectId}
+    order by created_at desc
+    limit 30
+  `;
+  return {
+    you: fromCents(mine),
+    spend,
+    payments: plan.map((payment) => ({
+      ...payment,
+      fromName: nameOf.get(payment.fromUserId) || "Member",
+      toName: nameOf.get(payment.toUserId) || "Member",
+    })),
+    privatePayments: privatePlan.map((payment) => ({
+      ...payment,
+      fromName: nameOf.get(payment.fromUserId) || "Member",
+      toName: nameOf.get(payment.toUserId) || "Member",
+    })),
+    history: history.map((row) => ({
+      id: row.id,
+      amount: row.amount,
+      method: row.payment_method,
+      note: row.note,
+      status: row.status,
+      createdAt: row.created_at,
+      fromName: nameOf.get(row.from_user_id) || "Member",
+      toName: nameOf.get(row.to_user_id) || "Member",
+    })),
+  };
+}
+
 export async function assertNoSettledEdit(sql: Sql, transactionId: string) {
   const rows = await sql<{ project_id: string | null; visibility: string }>`
     select project_id, visibility from transactions where id = ${transactionId}
@@ -67,38 +294,8 @@ export const listProjectMembers = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
-      const gate = await access(sql, context.userId, data.projectId);
-      if (!gate) throw new Error("Project not found");
-      const people = await sql<{ user_id: string; role: string; full_name: string | null }>`
-        select m.user_id, m.role, p.full_name
-        from project_members m
-        left join profiles p on p.id = m.user_id
-        where m.project_id = ${data.projectId} and m.status = 'active'
-      `;
-      const owner = await sql<{ id: string; full_name: string | null }>`
-        select pr.user_id as id, p.full_name from projects pr
-        left join profiles p on p.id = pr.user_id
-        where pr.id = ${data.projectId}
-      `;
-      const seen = new Set<string>();
-      const list: { userId: string; role: string; name: string }[] = [];
-      for (const person of people) {
-        if (seen.has(person.user_id)) continue;
-        seen.add(person.user_id);
-        list.push({
-          userId: person.user_id,
-          role: person.role,
-          name: person.full_name || "Member",
-        });
-      }
-      if (owner[0]) {
-        const existing = list.find((person) => person.userId === owner[0]!.id);
-        if (existing) existing.role = "owner";
-        else {
-          list.unshift({ userId: owner[0].id, role: "owner", name: owner[0].full_name || "Owner" });
-        }
-      }
-      return { role: gate.role, members: list, collaboration: gate.project.collaboration };
+      const group = await readMembers(sql, context.userId, data.projectId);
+      return { role: group.role, members: group.members, collaboration: group.collaboration };
     } catch (err) {
       publicError(err, "Couldn't load members.");
     }
@@ -110,32 +307,7 @@ export const createProjectInvite = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
-      const gate = await access(sql, context.userId, data.projectId);
-      if (!gate || gate.role !== "owner") throw new Error("Only the owner can invite");
-      await sql`
-        update projects set collaboration = 'collaborative', updated_at = now()
-        where id = ${data.projectId}
-      `;
-      const ownerRow = await sql<{ id: string }>`
-        select id from project_members
-        where project_id = ${data.projectId} and user_id = ${gate.project.user_id} and status = 'active'
-      `;
-      if (!ownerRow[0]) {
-        await sql`
-          insert into project_members (id, project_id, user_id, role, status)
-          values (${crypto.randomUUID()}, ${data.projectId}, ${gate.project.user_id}, 'owner', 'active')
-        `;
-      }
-      const token = randomBytes(24).toString("base64url");
-      const id = crypto.randomUUID();
-      await sql`
-        insert into project_invites (id, project_id, token_hash, invited_by, expires_at)
-        values (
-          ${id}, ${data.projectId}, ${hashToken(token)}, ${context.userId},
-          now() + interval '14 days'
-        )
-      `;
-      return { token, path: `/invite/${token}` };
+      return await issueInvite(sql, context.userId, data.projectId);
     } catch (err) {
       publicError(err, "Couldn't create an invite.");
     }
@@ -348,52 +520,8 @@ export const addProjectExpense = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
-      const gate = await access(sql, context.userId, data.projectId);
-      if (!gate) throw new Error("Project not found");
-      if (gate.project.collaboration !== "collaborative" && data.visibility !== "personal") {
-        throw new Error("Invite someone before splitting this project");
-      }
-      const amount = parseMoney(data.amount);
-      if (amount.startsWith("-") || amount === "0.00") throw new Error("Amount must be greater than zero");
-      const account = await ownedAccount(sql, context.userId, data.accountId);
-      if (!account) throw new Error("Choose a valid account");
-      if (data.categoryId) {
-        const cat = await ownedCategory(sql, context.userId, data.categoryId);
-        if (!cat) throw new Error("Choose a valid category");
-      }
-      const people = await memberIds(sql, data.projectId, gate.project.user_id);
-      const paidBy = data.visibility === "personal" ? context.userId : data.paidByUserId || context.userId;
-      if (!people.has(paidBy)) throw new Error("Choose who paid");
-      const affects = paidBy === context.userId;
-      const id = crypto.randomUUID();
-      let allocations: { userId: string; allocated: string }[] = [];
-      if (data.visibility !== "personal") {
-        const parts = (data.parts ?? []).filter((p) => p.userId);
-        if (parts.some((p) => !people.has(p.userId))) throw new Error("Someone in the split isn't on this project");
-        allocations = allocateSplits(amount, data.method ?? "equal", parts);
-      }
-      await sql`
-        insert into transactions (
-          id, user_id, account_id, category_id, project_id, type, amount,
-          transaction_date, description, is_committed, visibility, paid_by_user_id, affects_ledger
-        ) values (
-          ${id}, ${context.userId}, ${data.accountId}, ${data.categoryId ?? null}, ${data.projectId},
-          'expense', ${amount}::numeric, ${data.transactionDate}::date, ${data.description ?? null},
-          true, ${data.visibility}, ${paidBy}, ${affects}
-        )
-      `;
-      const method = data.method ?? "equal";
-      for (const row of allocations) {
-        const part = (data.parts ?? []).find((p) => p.userId === row.userId);
-        await sql`
-          insert into expense_splits (id, transaction_id, user_id, split_method, share_value, allocated_amount)
-          values (
-            ${crypto.randomUUID()}, ${id}, ${row.userId}, ${method},
-            ${part?.value || "1"}::numeric, ${row.allocated}::numeric
-          )
-        `;
-      }
-      return { id };
+      const saved = await writeSplitExpense(sql, context.userId, data);
+      return { id: saved.id };
     } catch (err) {
       publicError(err, "Couldn't add that expense.");
     }
@@ -662,60 +790,7 @@ export const getProjectBalances = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
-      const names = await sql<{ user_id: string; full_name: string | null }>`
-        select m.user_id, p.full_name from project_members m
-        left join profiles p on p.id = m.user_id
-        where m.project_id = ${data.projectId} and m.status = 'active'
-        union
-        select pr.user_id, p.full_name from projects pr
-        left join profiles p on p.id = pr.user_id
-        where pr.id = ${data.projectId}
-      `;
-      const nameOf = new Map(names.map((n) => [n.user_id, n.full_name || "Member"]));
-      const { plan, mine, privatePlan } = await loadProjectBalances(sql, data.projectId, context.userId);
-      const spend = await loadViewerSpend(sql, data.projectId, context.userId);
-      const history = await sql<{
-        id: string;
-        from_user_id: string;
-        to_user_id: string;
-        amount: string;
-        payment_method: string;
-        note: string | null;
-        status: string;
-        created_at: string;
-      }>`
-        select id, from_user_id, to_user_id, amount::text as amount, payment_method, note, status,
-               created_at::text as created_at
-        from settlements
-        where project_id = ${data.projectId}
-        order by created_at desc
-        limit 30
-      `;
-      const { fromCents: centsToMoney } = await import("@/lib/money");
-      return {
-        you: centsToMoney(mine),
-        spend,
-        payments: plan.map((p) => ({
-          ...p,
-          fromName: nameOf.get(p.fromUserId) || "Member",
-          toName: nameOf.get(p.toUserId) || "Member",
-        })),
-        privatePayments: privatePlan.map((p) => ({
-          ...p,
-          fromName: nameOf.get(p.fromUserId) || "Member",
-          toName: nameOf.get(p.toUserId) || "Member",
-        })),
-        history: history.map((h) => ({
-          id: h.id,
-          amount: h.amount,
-          method: h.payment_method,
-          note: h.note,
-          status: h.status,
-          createdAt: h.created_at,
-          fromName: nameOf.get(h.from_user_id) || "Member",
-          toName: nameOf.get(h.to_user_id) || "Member",
-        })),
-      };
+      return await readGroupBalances(sql, context.userId, data.projectId);
     } catch (err) {
       publicError(err, "Couldn't load balances.");
     }
@@ -736,32 +811,8 @@ export const createSettlement = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
-      const gate = await access(sql, context.userId, data.projectId);
-      if (!gate) throw new Error("Project not found");
-      const people = await memberIds(sql, data.projectId, gate.project.user_id);
-      if (!people.has(data.fromUserId) || !people.has(data.toUserId)) throw new Error("Pick people on this project");
-      if (data.fromUserId === data.toUserId) throw new Error("Settlement needs two people");
-      const amount = parseMoney(data.amount);
-      if (amount.startsWith("-") || amount === "0.00") throw new Error("Amount must be greater than zero");
-      const involved = data.fromUserId === context.userId || data.toUserId === context.userId || gate.role === "owner";
-      if (!involved) throw new Error("You can only settle a payment you're part of");
-      const id = crypto.randomUUID();
-      try {
-        await sql`
-          insert into settlements (
-            id, project_id, from_user_id, to_user_id, amount, payment_method, note,
-            status, created_by, completed_at
-          ) values (
-            ${id}, ${data.projectId}, ${data.fromUserId}, ${data.toUserId}, ${amount}::numeric,
-            ${data.paymentMethod ?? "upi"}, ${data.note ?? null}, 'completed', ${context.userId}, now()
-          )
-        `;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "";
-        if (message.includes("settlements_pending")) throw new Error("That settlement is already pending");
-        throw err;
-      }
-      return { id };
+      const saved = await writeSettlement(sql, context.userId, data);
+      return { id: saved.id };
     } catch (err) {
       publicError(err, "Couldn't record that settlement.");
     }
