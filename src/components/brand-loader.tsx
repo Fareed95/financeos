@@ -1,5 +1,5 @@
 export function BrandLoader({
-  label = "Loading your ledger…",
+  label = "Money, sorted.",
 }: {
   label?: string;
 }) {
@@ -11,7 +11,7 @@ export function BrandLoader({
           <span />
           <span />
         </div>
-        <p className="mt-8 font-display text-3xl tracking-tight">FinanceOS</p>
+        <p className="mt-8 font-display text-3xl tracking-tight">Kharcha</p>
         <p className="mt-2 text-sm text-muted-foreground">{label}</p>
       </div>
     </div>

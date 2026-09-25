@@ -41,7 +41,7 @@ export function PwaSplash() {
       className={phase === "out" ? "fos-splash fos-splash-out" : "fos-splash"}
       aria-hidden="true"
     >
-      <BrandLoader label="Your ledger" />
+      <BrandLoader label="Money, sorted." />
     </div>
   );
 }

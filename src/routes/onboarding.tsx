@@ -170,7 +170,7 @@ function Onboarding() {
 
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center px-5 py-12">
-      <p className="font-display text-2xl tracking-tight">FinanceOS</p>
+      <p className="font-display text-2xl tracking-tight">Kharcha</p>
       <p className="mt-8 text-xs tracking-wide text-muted-foreground uppercase">
         Step {step + 1} of {steps.length}
       </p>

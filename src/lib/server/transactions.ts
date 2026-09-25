@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { ensureUser, ownedAccount, ownedCategory, ownedProject } from "@/lib/server/ensure";
 import { mapTxn, TXN_FROM, TXN_SELECT } from "@/lib/server/map";
+import { assertNoSettledEdit } from "@/lib/server/collab";
 import { parseMoney } from "@/lib/money";
 import { publicError } from "@/lib/utils";
 import type { Transaction, TxnFilters, TxnType } from "@/lib/types";
@@ -78,7 +79,7 @@ export const listTransactions = createServerFn({ method: "POST" })
       const limit = Math.min(Math.max(data.limit ?? 40, 1), 100);
       const offset = Math.max(data.offset ?? 0, 0);
       const sort = SORTS[data.sort ?? "newest"];
-      const clauses: string[] = ["t.user_id = $1"];
+      const clauses: string[] = ["t.user_id = $1", "t.affects_ledger = true"];
       const params: unknown[] = [userId];
       const add = (value: unknown, sqlFrag: string) => {
         params.push(value);
@@ -170,6 +171,7 @@ export const upsertTransaction = createServerFn({ method: "POST" })
           select id from transactions where id = ${data.id} and user_id = ${userId}
         `;
         if (!existing[0]) throw new Error("Transaction not found");
+        await assertNoSettledEdit(sql, data.id);
         await sql`
           update transactions set
             account_id = ${data.accountId},
@@ -234,6 +236,7 @@ export const deleteTransaction = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
+      await assertNoSettledEdit(sql, data.id);
       const rows = await sql<{ id: string }>`
         delete from transactions
         where id = ${data.id} and user_id = ${context.userId}

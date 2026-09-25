@@ -2,7 +2,8 @@ import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { ensureUser, ownedCategory, ownedProject } from "@/lib/server/ensure";
 import { mapProject, mapTxn, PROJECT_FROM, PROJECT_SELECT, TXN_FROM, TXN_SELECT } from "@/lib/server/map";
-import { cmpMoney, divideMoney, parseMoney } from "@/lib/money";
+import { loadViewerSpend } from "@/lib/server/collab";
+import { cmpMoney, divideMoney, parseMoney, subMoney } from "@/lib/money";
 import { daysBetween, eachDayISO, publicError, todayISO } from "@/lib/utils";
 import type { DailySpend, Project, ProjectStatus, ProjectType, TripInsights } from "@/lib/types";
 
@@ -17,6 +18,10 @@ export const listProjects = createServerFn({ method: "POST" })
       const rows = await sql.query<Record<string, unknown>>(
         `select ${PROJECT_SELECT} ${PROJECT_FROM}
          where p.user_id = $1
+            or exists (
+              select 1 from project_members m
+              where m.project_id = p.id and m.user_id = $1 and m.status = 'active'
+            )
          order by case p.status when 'active' then 0 when 'planned' then 1 when 'completed' then 2 else 3 end, p.created_at desc`,
         [context.userId],
       );
@@ -117,17 +122,43 @@ export const getProjectDetail = createServerFn({ method: "POST" })
     try {
       const { sql } = await ensureUser(context.userId);
       const rows = await sql.query<Record<string, unknown>>(
-        `select ${PROJECT_SELECT} ${PROJECT_FROM} where p.id = $1 and p.user_id = $2`,
+        `select ${PROJECT_SELECT} ${PROJECT_FROM}
+         where p.id = $1 and (
+           p.user_id = $2 or exists (
+             select 1 from project_members m
+             where m.project_id = p.id and m.user_id = $2 and m.status = 'active'
+           )
+         )`,
         [data.id, context.userId],
       );
       if (!rows[0]) throw new Error("Project not found");
       const project = mapProject(rows[0]);
 
       const txns = await sql.query<Record<string, unknown>>(
-        `select ${TXN_SELECT} ${TXN_FROM}
-         where t.user_id = $1 and t.project_id = $2
-         order by t.transaction_date desc, t.created_at desc
-         limit 50`,
+        project.collaboration === "collaborative"
+          ? `select ${TXN_SELECT} ${TXN_FROM}
+             where t.project_id = $2 and t.is_committed = true
+               and (
+                 t.visibility = 'shared'
+                 or (t.visibility = 'personal' and t.user_id = $1)
+                 or (
+                   t.visibility = 'private'
+                   and (
+                     t.user_id = $1
+                     or t.paid_by_user_id = $1
+                     or exists (
+                       select 1 from expense_splits es
+                       where es.transaction_id = t.id and es.user_id = $1
+                     )
+                   )
+                 )
+               )
+             order by t.transaction_date desc, t.created_at desc
+             limit 50`
+          : `select ${TXN_SELECT} ${TXN_FROM}
+             where t.user_id = $1 and t.project_id = $2
+             order by t.transaction_date desc, t.created_at desc
+             limit 50`,
         [context.userId, data.id],
       );
 
@@ -136,8 +167,12 @@ export const getProjectDetail = createServerFn({ method: "POST" })
                coalesce(sum(t.amount), 0)::text as amount
         from transactions t
         left join categories c on c.id = t.category_id
-        where t.user_id = ${context.userId} and t.project_id = ${data.id}
+        where t.project_id = ${data.id}
           and t.type = 'expense' and t.is_committed = true
+          and (
+            (${project.collaboration} = 'personal' and t.user_id = ${context.userId} and t.visibility = 'personal')
+            or (${project.collaboration} = 'collaborative' and t.visibility = 'shared')
+          )
         group by t.category_id, c.name, c.icon
         order by sum(t.amount) desc
       `;
@@ -147,7 +182,11 @@ export const getProjectDetail = createServerFn({ method: "POST" })
                coalesce(sum(case when type = 'expense' then amount else 0 end), 0)::text as expense,
                coalesce(sum(case when type = 'income' then amount else 0 end), 0)::text as income
         from transactions
-        where user_id = ${context.userId} and project_id = ${data.id} and is_committed = true
+        where project_id = ${data.id} and is_committed = true
+          and (
+            (${project.collaboration} = 'personal' and user_id = ${context.userId} and visibility = 'personal')
+            or (${project.collaboration} = 'collaborative' and visibility = 'shared')
+          )
         group by transaction_date
         order by transaction_date asc
       `;
@@ -164,7 +203,21 @@ export const getProjectDetail = createServerFn({ method: "POST" })
       const end = project.endDate || today;
       const cursor = project.startDate && today < project.startDate ? project.startDate : today;
       const remainingDays = cursor > end ? 0 : Math.max(1, daysBetween(cursor, end) + 1);
-      const remaining = project.remaining;
+      const spend =
+        project.collaboration === "collaborative"
+          ? await loadViewerSpend(sql, data.id, context.userId)
+          : {
+              mySpend: project.netCost,
+              sharedSpend: "0.00",
+              personalSpend: project.totalCost,
+              youPaid: "0.00",
+              yourShare: "0.00",
+              myIncome: project.contributions,
+            };
+      const remaining =
+        project.collaboration === "collaborative"
+          ? subMoney(project.budget, subMoney(spend.mySpend, spend.myIncome))
+          : project.remaining;
       const remainingPositive = remaining.startsWith("-") ? "0.00" : remaining;
       const recommendedDaily = remainingDays > 0 ? divideMoney(remainingPositive, remainingDays) : remainingPositive;
       const todaySpend = todaySpendRows[0]?.amount ?? "0.00";
@@ -181,6 +234,12 @@ export const getProjectDetail = createServerFn({ method: "POST" })
         remaining,
         contributions: project.contributions,
         netCost: project.netCost,
+        mySpend: spend.mySpend,
+        sharedSpend: spend.sharedSpend,
+        personalSpend: spend.personalSpend,
+        youPaid: spend.youPaid,
+        yourShare: spend.yourShare,
+        myIncome: spend.myIncome,
         todaySpend,
         averageDaily,
         remainingDays,

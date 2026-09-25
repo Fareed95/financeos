@@ -1,6 +1,6 @@
 import type { AccountType, ProjectStatus, ProjectType, TxnType } from "./types";
 
-export const APP_NAME = "FinanceOS";
+export const APP_NAME = "Kharcha";
 
 export const DEFAULT_CATEGORIES: Array<{
   name: string;

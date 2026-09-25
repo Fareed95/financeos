@@ -49,7 +49,7 @@ export function AppShell() {
     <div className="flex min-h-dvh bg-background text-foreground">
       <aside className="sticky top-0 hidden h-dvh w-56 shrink-0 flex-col border-r border-border px-3 py-6 md:flex">
         <Link to="/" className="mb-8 px-3 font-display text-2xl tracking-tight">
-          FinanceOS
+          Kharcha
         </Link>
         <nav className="flex flex-1 flex-col gap-1">
           {DESKTOP.map((item) => {
@@ -83,7 +83,7 @@ export function AppShell() {
         {!isAssistant && (
           <header className="flex items-center justify-between px-5 pt-[max(1rem,env(safe-area-inset-top))] pb-2 md:hidden">
             <Link to="/" className="font-display text-xl tracking-tight">
-              FinanceOS
+              Kharcha
             </Link>
             <Link
               to="/assistant"

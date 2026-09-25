@@ -151,14 +151,45 @@ export function stripInstallParams(url) {
   return rest ? `${path}?${rest}` : path;
 }
 
-export function renderInstallPageHtml(template, { host, url } = {}) {
+export function resolveAppDisplayName(hostHeader, site = {}) {
+  const fromSite = String(site?.title ?? "").trim();
+  if (fromSite) return fromSite;
+  return appNameFromHost(hostHeader);
+}
+
+function manifestTheme(site = {}) {
+  const hex = placeholderCardColor(site);
+  return hex ? `#${hex.toLowerCase()}` : "#000000";
+}
+
+export function renderInstallPageHtml(template, { host, url, site } = {}) {
   return String(template)
-    .replaceAll("{{APP_NAME}}", escapeHtml(appNameFromHost(host)))
+    .replaceAll("{{APP_NAME}}", escapeHtml(resolveAppDisplayName(host, site)))
     .replaceAll("{{APP_URL}}", escapeHtml(stripInstallParams(url)));
 }
 
-export function renderWebManifest(hostHeader) {
-  const name = appNameFromHost(hostHeader);
+export function renderWebManifest(hostHeader, site = {}) {
+  const name = resolveAppDisplayName(hostHeader, site);
+  const branded = Boolean(String(site?.title ?? "").trim());
+  const color = branded ? manifestTheme(site) : "#000000";
+  const icons = branded
+    ? [
+        { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+        { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+        {
+          src: "/icon-512-maskable.png",
+          sizes: "512x512",
+          type: "image/png",
+          purpose: "maskable",
+        },
+      ]
+    : [
+        {
+          src: "/__grok/icon-180.png",
+          sizes: "180x180",
+          type: "image/png",
+        },
+      ];
   return JSON.stringify(
     {
       name,
@@ -167,15 +198,9 @@ export function renderWebManifest(hostHeader) {
       start_url: "/",
       scope: "/",
       display: "standalone",
-      background_color: "#000000",
-      theme_color: "#000000",
-      icons: [
-        {
-          src: "/__grok/icon-180.png",
-          sizes: "180x180",
-          type: "image/png",
-        },
-      ],
+      background_color: color,
+      theme_color: color,
+      icons,
     },
     null,
     2,

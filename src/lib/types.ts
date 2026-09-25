@@ -59,6 +59,7 @@ export type Project = {
   status: ProjectStatus;
   icon: string;
   isDemo: boolean;
+  collaboration: "personal" | "collaborative";
   totalCost: string;
   prepaid: string;
   duringTrip: string;
@@ -90,6 +91,8 @@ export type Transaction = {
   isDemo: boolean;
   hasReceipt: boolean;
   createdAt: string;
+  visibility?: "personal" | "shared" | "private";
+  paidByName?: string | null;
 };
 
 export type Budget = {
@@ -153,6 +156,12 @@ export type TripInsights = {
   remaining: string;
   contributions: string;
   netCost: string;
+  mySpend: string;
+  sharedSpend: string;
+  personalSpend: string;
+  youPaid: string;
+  yourShare: string;
+  myIncome: string;
   todaySpend: string;
   averageDaily: string;
   remainingDays: number;

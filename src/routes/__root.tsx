@@ -8,7 +8,7 @@ import { PwaSplash } from "@/components/pwa-splash";
 import { Toaster } from "@/components/ui/sonner";
 import appCss from "../styles.css?url";
 
-const APP_NAME = "FinanceOS";
+const APP_NAME = "Kharcha";
 
 const SPLASH = [
   { w: 430, h: 932, dpr: 3, file: "1290x2796" },
@@ -31,7 +31,7 @@ export const Route = createRootRoute({
       { title: APP_NAME },
       { name: "application-name", content: APP_NAME },
       { name: "theme-color", content: "#0c0c0d" },
-      { name: "description", content: "Personal finance and trip operating system." },
+      { name: "description", content: "Money, sorted." },
       { name: "apple-mobile-web-app-capable", content: "yes" },
       { name: "mobile-web-app-capable", content: "yes" },
       { name: "apple-mobile-web-app-title", content: APP_NAME },

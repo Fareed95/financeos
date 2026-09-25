@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rasterize FinanceOS PWA icons and iOS splash screens."""
+"""Rasterize Kharcha PWA icons and iOS splash screens."""
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -77,12 +77,12 @@ def make_splash(w: int, h: int) -> Image.Image:
 
     draw = ImageDraw.Draw(img)
     f = font(max(28, int(w * 0.055)))
-    text = "FinanceOS"
+    text = "Kharcha"
     bbox = draw.textbbox((0, 0), text, font=f)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     draw.text(((w - tw) / 2, iy + icon_size + int(h * 0.028)), text, font=f, fill=INK)
     sub = font(max(16, int(w * 0.028)))
-    label = "Your ledger"
+    label = "Money, sorted."
     bbox = draw.textbbox((0, 0), label, font=sub)
     sw = bbox[2] - bbox[0]
     draw.text(((w - sw) / 2, iy + icon_size + int(h * 0.028) + th + 14), label, font=sub, fill=MUTED)

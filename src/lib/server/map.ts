@@ -89,6 +89,7 @@ export function mapProject(row: Record<string, unknown>): Project {
     status: asStr(row.status) as ProjectStatus,
     icon: asStr(row.icon) || "folder",
     isDemo: asBool(row.is_demo),
+    collaboration: (asStr(row.collaboration) || "personal") as "personal" | "collaborative",
     totalCost,
     prepaid: asNumStr(row.prepaid),
     duringTrip: asNumStr(row.during_trip),
@@ -119,6 +120,8 @@ export const TXN_SELECT = `
   t.is_prepaid,
   t.is_committed,
   t.is_demo,
+  t.visibility,
+  payer.full_name as paid_by_name,
   exists(select 1 from attachments att where att.transaction_id = t.id) as has_receipt,
   t.created_at::text as created_at
 `;
@@ -129,6 +132,7 @@ export const TXN_FROM = `
   left join categories c on c.id = t.category_id
   left join projects p on p.id = t.project_id
   left join accounts ca on ca.id = t.counterparty_account_id
+  left join profiles payer on payer.id = t.paid_by_user_id
 `;
 
 export function mapTxn(row: Record<string, unknown>): Transaction {
@@ -154,6 +158,8 @@ export function mapTxn(row: Record<string, unknown>): Transaction {
     isDemo: asBool(row.is_demo),
     hasReceipt: asBool(row.has_receipt),
     createdAt: asStr(row.created_at),
+    visibility: (asStr(row.visibility) || "personal") as "personal" | "shared" | "private",
+    paidByName: asNullStr(row.paid_by_name),
   };
 }
 
@@ -179,6 +185,7 @@ export const PROJECT_SELECT = `
   p.id, p.name, p.description, p.project_type,
   p.start_date::text as start_date, p.end_date::text as end_date,
   p.budget::text as budget, p.status, p.icon, p.is_demo,
+  p.collaboration,
   coalesce(s.total_cost, 0)::text as total_cost,
   coalesce(s.prepaid, 0)::text as prepaid,
   coalesce(s.during_trip, 0)::text as during_trip,
@@ -200,6 +207,18 @@ export const PROJECT_FROM = `
         then t.amount else 0 end), 0) as during_trip,
       count(*) filter (where t.type in ('expense', 'refund', 'income')) as txn_count
     from transactions t
-    where t.project_id = p.id and t.user_id = p.user_id and t.is_committed = true
+    where t.project_id = p.id and t.is_committed = true
+      and (
+        (p.collaboration = 'personal' and t.user_id = p.user_id and t.visibility = 'personal')
+        or (p.collaboration = 'collaborative' and t.visibility = 'shared')
+        or (
+          t.type = 'income'
+          and t.visibility <> 'private'
+          and (
+            (p.collaboration = 'personal' and t.user_id = p.user_id)
+            or (p.collaboration = 'collaborative' and t.visibility = 'shared')
+          )
+        )
+      )
   ) s on true
 `;

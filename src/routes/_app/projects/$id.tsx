@@ -27,6 +27,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { ProjectCollab } from "@/components/finance/project-collab";
 import { toast } from "sonner";
 
 const CATEGORY_ICON = Object.fromEntries(DEFAULT_CATEGORIES.map((c) => [c.name, c.icon]));
@@ -83,14 +84,20 @@ function ProjectDetail() {
       {isTrip ? (
         <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
           <Metric label="Budget" value={formatMoney(insights.budget, currency)} />
-          <Metric label="Total cost" value={formatMoney(insights.totalCost, currency)} />
+          <Metric
+            label={project.collaboration === "collaborative" ? "Group spend" : "Total cost"}
+            value={formatMoney(insights.totalCost, currency)}
+          />
           <Metric label="Prepaid" value={formatMoney(insights.prepaid, currency)} />
           <Metric label="During trip" value={formatMoney(insights.duringTrip, currency)} />
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-2">
           <Metric label="Budget" value={formatMoney(project.budget, currency)} />
-          <Metric label="Spent" value={formatMoney(project.totalCost, currency)} />
+          <Metric
+            label={project.collaboration === "collaborative" ? "Group spend" : "Spent"}
+            value={formatMoney(project.totalCost, currency)}
+          />
         </div>
       )}
 
@@ -108,20 +115,22 @@ function ProjectDetail() {
           percent={percentUsed(insights.totalCost, insights.budget)}
           currency={currency}
         />
-        {!isZero(insights.contributions) && (
+        {!isZero(insights.contributions) && project.collaboration !== "collaborative" && (
           <p className="mt-3 text-sm text-muted-foreground">
             {formatMoney(insights.contributions, currency)} contributed · net cost{" "}
             {formatMoney(insights.netCost, currency)}
           </p>
         )}
+        {project.collaboration === "collaborative" && (
+          <p className="mt-3 text-sm text-muted-foreground">
+            Your spend {formatMoney(insights.mySpend, currency)}
+            {!isZero(insights.myIncome) ? ` · ${formatMoney(insights.myIncome, currency)} in` : ""}. Remaining
+            uses your spend, not the whole group.
+          </p>
+        )}
       </section>
 
-      {!isZero(insights.contributions) && (
-        <section className="grid grid-cols-2 gap-2">
-          <Metric label="Contributed" value={formatMoney(insights.contributions, currency)} />
-          <Metric label="Net cost" value={formatMoney(insights.netCost, currency)} />
-        </section>
-      )}
+      <ProjectCollab projectId={project.id} />
 
       {isTrip && (
         <section className="grid grid-cols-2 gap-2 md:grid-cols-4">
@@ -163,7 +172,9 @@ function ProjectDetail() {
 
       {insights.categoryBreakdown.length > 0 && (
         <section className="space-y-3">
-          <h2 className="text-sm font-medium">By category</h2>
+          <h2 className="text-sm font-medium">
+            {project.collaboration === "collaborative" ? "Group by category" : "By category"}
+          </h2>
           <div className="rounded-xl bg-card p-3 shadow-[var(--elev-shadow)]">
             {insights.categoryBreakdown.map((c) => {
               const pct = percentUsed(c.amount, catTotal);

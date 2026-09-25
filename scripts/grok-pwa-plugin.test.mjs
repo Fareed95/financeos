@@ -467,7 +467,7 @@ test("rejects hosts that are not plain slugs", () => {
 
 test("renders install page markup", () => {
   const html = renderInstallPage("wild-race.grok.me", "/?install=1&platform=ios");
-  assert.match(html, /Add FinanceOS to your/);
+  assert.match(html, /Add Wild Race to your/);
   assert.match(html, /\/__grok\/install\/styles\.css/);
   assert.match(html, /href="\/"/);
   assert.equal(html.includes("{{APP_NAME}}"), false);
@@ -481,12 +481,25 @@ test("escapes host-derived values in the install page", () => {
 
 test("renders the manifest with the per-app name", () => {
   const manifest = JSON.parse(renderWebManifest("wild-race.grok.me"));
-  assert.equal(manifest.name, "FinanceOS");
-  assert.equal(manifest.short_name, "FinanceOS");
+  assert.equal(manifest.name, "Wild Race");
+  assert.equal(manifest.short_name, "Wild Race");
+  assert.equal(manifest.theme_color, "#000000");
+  assert.equal(manifest.background_color, "#000000");
+  assert.equal(manifest.icons[0].src, "/__grok/icon-180.png");
+});
+
+test("site title overrides host name on the install page and manifest", () => {
+  const site = { title: "Kharcha", color: "0C0C0D" };
+  const html = renderInstallPage("localhost:8080", "/?install=1&platform=ios", site);
+  assert.match(html, /Add Kharcha to your/);
+  assert.equal(html.includes("Grok App"), false);
+  const manifest = JSON.parse(renderWebManifest("localhost:8080", site));
+  assert.equal(manifest.name, "Kharcha");
+  assert.equal(manifest.short_name, "Kharcha");
   assert.equal(manifest.theme_color, "#0c0c0d");
   assert.equal(manifest.background_color, "#0c0c0d");
   assert.equal(manifest.icons[0].src, "/icon-192.png");
-  assert.equal(manifest.icons[1].src, "/icon-512.png");
+  assert.equal(manifest.icons[2].purpose, "maskable");
 });
 
 // Tripwires: the deployed-app path only works if Nitro scans server/ — an

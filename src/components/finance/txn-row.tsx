@@ -46,6 +46,8 @@ export function TxnRow({
           {formatShortDate(txn.transactionDate)}
           {txn.accountName ? ` · ${txn.accountName}` : ""}
           {txn.projectName ? ` · ${txn.projectName}` : ""}
+          {txn.visibility && txn.visibility !== "personal" ? ` · ${txn.visibility}` : ""}
+          {txn.visibility && txn.visibility !== "personal" && txn.paidByName ? ` · ${txn.paidByName} paid` : ""}
         </p>
       </div>
       <p className={cn("tabular shrink-0 text-sm font-medium", color)}>

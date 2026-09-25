@@ -44,7 +44,8 @@ function Login() {
         });
         if (err) throw new Error(err.message ?? "Could not sign in");
       }
-      window.location.href = "/";
+      const next = new URLSearchParams(window.location.search).get("next");
+      window.location.href = next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
       setBusy(false);
@@ -54,7 +55,7 @@ function Login() {
   return (
     <main className="grid min-h-dvh bg-background lg:grid-cols-[minmax(0,1.15fr)_minmax(24rem,0.85fr)]">
       <section className="fos-login-pane relative hidden flex-col justify-between overflow-hidden px-12 py-10 lg:flex">
-        <p className="relative font-display text-2xl tracking-tight">FinanceOS</p>
+        <p className="relative font-display text-2xl tracking-tight">Kharcha</p>
         <div className="relative max-w-lg space-y-5">
           <h1 className="font-display text-[3.25rem] leading-[1.08] tracking-tight">
             Your money,
@@ -76,10 +77,8 @@ function Login() {
       <section className="flex items-center justify-center px-5 py-10 pt-[max(2.5rem,env(safe-area-inset-top))] pb-[max(2rem,env(safe-area-inset-bottom))]">
         <div className="w-full max-w-[22.5rem]">
           <div className="mb-8 lg:hidden">
-            <p className="font-display text-2xl tracking-tight">FinanceOS</p>
-            <p className="mt-3 font-display text-3xl leading-tight tracking-tight">
-              Your money, in one quiet place.
-            </p>
+            <p className="font-display text-2xl tracking-tight">Kharcha</p>
+            <p className="mt-3 font-display text-3xl leading-tight tracking-tight">Money, sorted.</p>
           </div>
 
           <div className="rounded-2xl bg-card p-6 shadow-[var(--elev-shadow)]">
