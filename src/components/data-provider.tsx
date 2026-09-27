@@ -6,6 +6,7 @@ import { useCurrentUser } from "@/lib/auth/use-current-user";
 import type { Bootstrap } from "@/lib/types";
 import { enqueueTxn, readQueue, removeQueued } from "@/lib/offline-queue";
 import { upsertTransaction, type TxnInput } from "@/lib/server/transactions";
+import type { ShareLink } from "@/lib/server/split-links";
 import { toast } from "sonner";
 
 const client = new QueryClient({
@@ -27,7 +28,7 @@ const DataCtx = createContext<{
   today: string;
   currency: string;
   refresh: () => Promise<void>;
-  saveTxn: (input: TxnInput) => Promise<void>;
+  saveTxn: (input: TxnInput) => Promise<{ shareLinks?: ShareLink[] } | void>;
 } | null>(null);
 
 export function DataProvider({ children }: { children: ReactNode }) {
@@ -53,13 +54,17 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const saveTxn = useCallback(
     async (input: TxnInput) => {
       if (typeof navigator !== "undefined" && !navigator.onLine) {
+        if (input.splitMode === "open" || input.splitMode === "group") {
+          throw new Error("You need a connection to share a split");
+        }
         enqueueTxn(input);
         toast.message("Saved offline. It will sync when you're back.");
         return;
       }
       try {
-        await upsertTransaction({ data: input });
+        const saved = await upsertTransaction({ data: input });
         await refresh();
+        return saved;
       } catch (err) {
         if (!navigator.onLine) {
           enqueueTxn(input);

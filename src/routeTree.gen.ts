@@ -22,6 +22,7 @@ import { Route as AppReportsRouteImport } from './routes/_app/reports'
 import { Route as AppSettingsRouteImport } from './routes/_app/settings'
 import { Route as AppTransactionsRouteImport } from './routes/_app/transactions'
 import { Route as InviteTokenRouteImport } from './routes/invite/$token'
+import { Route as SplitTokenRouteImport } from './routes/split/$token'
 import { Route as AppAccountsIndexRouteImport } from './routes/_app/accounts/index'
 import { Route as AppAccountsIdRouteImport } from './routes/_app/accounts/$id'
 import { Route as AppProjectsIndexRouteImport } from './routes/_app/projects/index'
@@ -92,6 +93,11 @@ const InviteTokenRoute = InviteTokenRouteImport.update({
   path: '/invite/$token',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SplitTokenRoute = SplitTokenRouteImport.update({
+  id: '/split/$token',
+  path: '/split/$token',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AppAccountsIndexRoute = AppAccountsIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -131,6 +137,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof AppSettingsRoute
   '/transactions': typeof AppTransactionsRoute
   '/invite/$token': typeof InviteTokenRoute
+  '/split/$token': typeof SplitTokenRoute
   '/accounts/$id': typeof AppAccountsIdRoute
   '/projects/$id': typeof AppProjectsIdRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
@@ -147,6 +154,7 @@ export interface FileRoutesByTo {
   '/settings': typeof AppSettingsRoute
   '/transactions': typeof AppTransactionsRoute
   '/invite/$token': typeof InviteTokenRoute
+  '/split/$token': typeof SplitTokenRoute
   '/': typeof AppIndexRoute
   '/accounts/$id': typeof AppAccountsIdRoute
   '/projects/$id': typeof AppProjectsIdRoute
@@ -168,6 +176,7 @@ export interface FileRoutesById {
   '/_app/settings': typeof AppSettingsRoute
   '/_app/transactions': typeof AppTransactionsRoute
   '/invite/$token': typeof InviteTokenRoute
+  '/split/$token': typeof SplitTokenRoute
   '/_app/': typeof AppIndexRoute
   '/_app/accounts/$id': typeof AppAccountsIdRoute
   '/_app/projects/$id': typeof AppProjectsIdRoute
@@ -190,6 +199,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/transactions'
     | '/invite/$token'
+    | '/split/$token'
     | '/accounts/$id'
     | '/projects/$id'
     | '/api/auth/$'
@@ -206,6 +216,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/transactions'
     | '/invite/$token'
+    | '/split/$token'
     | '/'
     | '/accounts/$id'
     | '/projects/$id'
@@ -226,6 +237,7 @@ export interface FileRouteTypes {
     | '/_app/settings'
     | '/_app/transactions'
     | '/invite/$token'
+    | '/split/$token'
     | '/_app/'
     | '/_app/accounts/$id'
     | '/_app/projects/$id'
@@ -239,6 +251,7 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   OnboardingRoute: typeof OnboardingRoute
   InviteTokenRoute: typeof InviteTokenRoute
+  SplitTokenRoute: typeof SplitTokenRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
 }
 
@@ -333,6 +346,13 @@ declare module '@tanstack/react-router' {
       path: '/invite/$token'
       fullPath: '/invite/$token'
       preLoaderRoute: typeof InviteTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/split/$token': {
+      id: '/split/$token'
+      path: '/split/$token'
+      fullPath: '/split/$token'
+      preLoaderRoute: typeof SplitTokenRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_app/accounts/': {
@@ -432,6 +452,7 @@ const rootRouteChildren: RootRouteChildren = {
   LoginRoute: LoginRoute,
   OnboardingRoute: OnboardingRoute,
   InviteTokenRoute: InviteTokenRoute,
+  SplitTokenRoute: SplitTokenRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
 }
 export const routeTree = rootRouteImport

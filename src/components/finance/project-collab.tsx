@@ -20,6 +20,8 @@ import {
 import { formatMoney, isNegative, isZero } from "@/lib/money";
 import { allocateSplits, type SplitMethod } from "@/lib/split";
 import { todayISO } from "@/lib/utils";
+import { ShareSplitList } from "@/components/finance/share-split";
+import type { ShareLink } from "@/lib/server/split-links";
 import { toast } from "sonner";
 
 export function ProjectCollab({ projectId }: { projectId: string }) {
@@ -283,12 +285,15 @@ function ExpenseSheet({
   const [picked, setPicked] = useState<string[]>(people.map((p) => p.userId));
   const [method, setMethod] = useState<SplitMethod>("equal");
   const [values, setValues] = useState<Record<string, string>>({});
+  const [emails, setEmails] = useState<Record<string, string>>({});
+  const [guests, setGuests] = useState<{ id: string; name: string; email: string; value: string }[]>([]);
+  const [links, setLinks] = useState<ShareLink[] | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function save() {
     setBusy(true);
     try {
-      await addProjectExpense({
+      const saved = await addProjectExpense({
         data: {
           projectId,
           accountId,
@@ -300,8 +305,20 @@ function ExpenseSheet({
           paidByUserId: paidBy,
           method,
           parts: picked.map((id) => ({ userId: id, value: values[id] || "1" })),
+          origin: window.location.origin,
+          emails,
+          guests: guests.filter((guest) => guest.name.trim()).map((guest) => ({
+            name: guest.name.trim(),
+            email: guest.email.trim(),
+            value: guest.value,
+          })),
         },
       });
+      if (saved?.shareLinks?.length) {
+        setLinks(saved.shareLinks);
+        toast.success("Split saved");
+        return;
+      }
       toast.success("Expense added");
       onOpenChange(false);
       await onSaved();
@@ -316,8 +333,21 @@ function ExpenseSheet({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent side="bottom" className="max-h-[92dvh] overflow-y-auto">
         <SheetHeader>
-          <SheetTitle>Add expense</SheetTitle>
+          <SheetTitle>{links ? "Share the split" : "Add expense"}</SheetTitle>
         </SheetHeader>
+        {links ? (
+          <div className="px-4 pb-8">
+            <ShareSplitList
+              links={links}
+              currency={currency}
+              onDone={() => {
+                setLinks(null);
+                onOpenChange(false);
+                void onSaved();
+              }}
+            />
+          </div>
+        ) : (
         <div className="space-y-4 px-4 pb-8">
           <Field label="Amount">
             <Input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} className="h-11" />
@@ -405,6 +435,58 @@ function ExpenseSheet({
                     </Field>
                   );
                 })}
+              {picked
+                .filter((id) => id !== paidBy)
+                .map((id) => {
+                  const person = people.find((p) => p.userId === id);
+                  return (
+                    <Field key={`mail-${id}`} label={`${person?.name ?? "Person"} email`}>
+                      <Input
+                        type="email"
+                        inputMode="email"
+                        placeholder="Optional — opens in your mail"
+                        className="h-11"
+                        value={emails[id] ?? ""}
+                        onChange={(e) => setEmails({ ...emails, [id]: e.target.value })}
+                      />
+                    </Field>
+                  );
+                })}
+              {guests.map((guest) => (
+                <div key={guest.id} className="grid gap-1.5">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <Input
+                      placeholder="Name"
+                      className="h-11"
+                      value={guest.name}
+                      onChange={(e) => setGuests((list) => list.map((item) => (item.id === guest.id ? { ...item, name: e.target.value } : item)))}
+                    />
+                    <Input
+                      type="email"
+                      placeholder="Email, optional"
+                      className="h-11"
+                      value={guest.email}
+                      onChange={(e) => setGuests((list) => list.map((item) => (item.id === guest.id ? { ...item, email: e.target.value } : item)))}
+                    />
+                  </div>
+                  {method !== "equal" && (
+                    <Input
+                      inputMode="decimal"
+                      placeholder={method === "percentage" ? "Their %" : "Their amount"}
+                      className="h-11"
+                      value={guest.value}
+                      onChange={(e) => setGuests((list) => list.map((item) => (item.id === guest.id ? { ...item, value: e.target.value } : item)))}
+                    />
+                  )}
+                </div>
+              ))}
+              <button
+                type="button"
+                className="text-xs text-muted-foreground"
+                onClick={() => setGuests((list) => [...list, { id: `g-${Date.now()}`, name: "", email: "", value: "" }])}
+              >
+                Add someone who isn't on the project
+              </button>
               <SplitPreview
                 amount={amount}
                 method={method}
@@ -412,6 +494,11 @@ function ExpenseSheet({
                 values={values}
                 people={people}
                 currency={currency}
+                extras={guests.filter((guest) => guest.name.trim()).map((guest) => ({
+                  key: guest.id,
+                  name: guest.name.trim(),
+                  value: guest.value,
+                }))}
               />
             </>
           )}
@@ -419,6 +506,7 @@ function ExpenseSheet({
             {busy ? "Saving…" : "Save expense"}
           </Button>
         </div>
+        )}
       </SheetContent>
     </Sheet>
   );
@@ -597,6 +685,7 @@ function SplitPreview({
   values,
   people,
   currency,
+  extras = [],
 }: {
   amount: string;
   method: SplitMethod;
@@ -604,23 +693,28 @@ function SplitPreview({
   values: Record<string, string>;
   people: { userId: string; name: string }[];
   currency: string;
+  extras?: { key: string; name: string; value: string }[];
 }) {
-  if (!amount || picked.length === 0) return null;
+  if (!amount || (picked.length === 0 && extras.length === 0)) return null;
   let rows: { userId: string; allocated: string }[] = [];
   try {
     rows = allocateSplits(
       amount,
       method,
-      picked.map((id) => ({ userId: id, value: values[id] || (method === "equal" || method === "shares" ? "1" : "0") })),
+      [
+        ...picked.map((id) => ({ userId: id, value: values[id] || (method === "equal" || method === "shares" ? "1" : "0") })),
+        ...extras.map((extra) => ({ userId: extra.key, value: extra.value || (method === "equal" || method === "shares" ? "1" : "0") })),
+      ],
     );
   } catch (err) {
     return <p className="text-sm text-expense">{err instanceof Error ? err.message : "Check the split"}</p>;
   }
+  const label = (id: string) => people.find((person) => person.userId === id)?.name ?? extras.find((extra) => extra.key === id)?.name ?? "Member";
   return (
     <div className="space-y-1">
       {rows.map((row) => (
         <p key={row.userId} className="flex justify-between text-sm">
-          <span>{people.find((person) => person.userId === row.userId)?.name ?? "Member"}</span>
+          <span>{label(row.userId)}</span>
           <span className="tabular">{formatMoney(row.allocated, currency)}</span>
         </p>
       ))}

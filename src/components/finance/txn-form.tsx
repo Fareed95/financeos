@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -7,24 +7,19 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { CategoryIcon } from "@/components/finance/icons";
+import { ShareSplitList } from "@/components/finance/share-split";
+import { SplitEditor, type SplitSnapshot } from "@/components/finance/split-editor";
 import { useAppData } from "@/components/data-provider";
 import { useCurrentUser } from "@/lib/auth/use-current-user";
 import { compressReceipt } from "@/lib/receipt";
-import { formatMoney, parseMoney } from "@/lib/money";
-import { allocateSplits } from "@/lib/split";
+import { parseMoney } from "@/lib/money";
 import { listProjectMembers } from "@/lib/server/collab";
+import { getTxnSplit } from "@/lib/server/split-links";
+import type { ShareLink } from "@/lib/server/split-links";
 import { cn, todayISO } from "@/lib/utils";
 import type { Transaction, TxnType } from "@/lib/types";
 import type { TxnInput } from "@/lib/server/transactions";
 import { toast } from "sonner";
-
-const SPLIT_OPTIONS = [
-  { id: "personal", label: "Just mine" },
-  { id: "shared", label: "With group" },
-  { id: "private", label: "Private" },
-] as const;
-
-type Visibility = (typeof SPLIT_OPTIONS)[number]["id"];
 
 const TYPES: { id: TxnType; label: string }[] = [
   { id: "expense", label: "Expense" },
@@ -73,9 +68,11 @@ export function TxnForm({
   const [removeReceipt, setRemoveReceipt] = useState(false);
   const [busy, setBusy] = useState(false);
   const [more, setMore] = useState(Boolean(initial));
-  const [visibility, setVisibility] = useState<Visibility>(initial?.visibility ?? "personal");
-  const [picked, setPicked] = useState<string[]>([]);
-  const [pickedTouched, setPickedTouched] = useState(false);
+  const [links, setLinks] = useState<ShareLink[] | null>(null);
+  const splitRef = useRef<SplitSnapshot>({ mode: "off", method: "equal", visibility: "personal", parts: [], error: "" });
+  const onSplit = useCallback((snap: SplitSnapshot) => {
+    splitRef.current = snap;
+  }, []);
 
   useEffect(() => {
     if (defaults?.categoryName && !initial) {
@@ -91,11 +88,16 @@ export function TxnForm({
   }, [accountId, accounts]);
 
   const selectedProject = projects.find((p) => p.id === projectId);
-  const showSplit = type === "expense" && selectedProject?.collaboration === "collaborative";
+  const collaborative = type === "expense" && selectedProject?.collaboration === "collaborative";
   const membersQuery = useQuery({
     queryKey: ["project-members", projectId],
     queryFn: () => listProjectMembers({ data: { projectId } }),
-    enabled: showSplit && Boolean(projectId),
+    enabled: collaborative && Boolean(projectId),
+  });
+  const splitQuery = useQuery({
+    queryKey: ["txn-split", initial?.id],
+    queryFn: () => getTxnSplit({ data: { transactionId: initial!.id } }),
+    enabled: Boolean(initial?.id) && type === "expense",
   });
   const people = useMemo(() => {
     const seen = new Set<string>();
@@ -105,39 +107,6 @@ export function TxnForm({
       return true;
     });
   }, [membersQuery.data]);
-
-  useEffect(() => {
-    if (!showSplit || pickedTouched) return;
-    const ids = people.map((person) => person.userId);
-    if (ids.length === 0) return;
-    setPicked((prev) => (prev.length === ids.length && prev.every((id, i) => id === ids[i]) ? prev : ids));
-  }, [showSplit, pickedTouched, people]);
-
-  const splitPreview = useMemo(() => {
-    if (!showSplit || visibility === "personal" || picked.length < 2) return "";
-    try {
-      const total = parseMoney(amount);
-      const allocations = allocateSplits(
-        total,
-        "equal",
-        picked.map((id) => ({ userId: id, value: "1" })),
-      );
-      const ordered = [...allocations].sort((a, b) => {
-        if (a.userId === me?.id) return -1;
-        if (b.userId === me?.id) return 1;
-        return 0;
-      });
-      return ordered
-        .map((row) => {
-          const person = people.find((item) => item.userId === row.userId);
-          const label = row.userId === me?.id ? "You" : person?.name || "Member";
-          return `${label} ${formatMoney(row.allocated, currency)}`;
-        })
-        .join(" · ");
-    } catch {
-      return "";
-    }
-  }, [showSplit, visibility, picked, amount, people, me?.id, currency]);
 
   const visibleCats = useMemo(() => {
     const want = type === "income" || type === "refund" ? "income" : "expense";
@@ -157,12 +126,13 @@ export function TxnForm({
       toast.error(err instanceof Error ? err.message : "Enter a valid amount");
       return;
     }
-    if (showSplit && visibility !== "personal" && picked.length < 2) {
-      toast.error(people.length < 2 ? "Invite someone before splitting this project" : "Pick at least two people to split with");
+    if (type === "expense" && splitRef.current.mode !== "off" && splitRef.current.error) {
+      toast.error(splitRef.current.error);
       return;
     }
     setBusy(true);
     try {
+      const snap = splitRef.current;
       const payload: TxnInput = {
         id: initial?.id,
         accountId,
@@ -176,17 +146,38 @@ export function TxnForm({
         notes: notes.trim() || null,
         isPrepaid: prepaid,
         isCommitted: committed,
-        ...(showSplit
+        ...(type === "expense"
           ? {
-              visibility,
-              splitMethod: "equal" as const,
-              splitUserIds: visibility === "personal" ? undefined : picked,
+              splitMode: snap.mode,
+              splitMethod: snap.method === "shares" ? "equal" : snap.method,
+              visibility: snap.mode === "group" ? snap.visibility : snap.mode === "off" && collaborative ? "personal" : undefined,
+              splitUserIds: snap.mode === "group" ? snap.parts.map((part) => part.userId).filter((id): id is string => Boolean(id)) : undefined,
+              splitValues: snap.mode === "group" ? Object.fromEntries(snap.parts.map((part) => [part.userId, part.value])) : undefined,
+              splitEmails:
+                snap.mode === "group"
+                  ? Object.fromEntries(snap.parts.filter((part) => part.userId && part.email).map((part) => [part.userId as string, part.email]))
+                  : undefined,
+              openParts:
+                snap.mode === "open"
+                  ? snap.parts.map((part) => ({
+                      userId: part.userId ?? null,
+                      name: part.name,
+                      email: part.email || null,
+                      value: part.value,
+                    }))
+                  : undefined,
+              origin: window.location.origin,
             }
           : {}),
         receipt,
         removeReceipt,
       };
-      await saveTxn(payload);
+      const saved = await saveTxn(payload);
+      if (saved?.shareLinks && saved.shareLinks.length > 0) {
+        setLinks(saved.shareLinks);
+        toast.success("Split saved");
+        return;
+      }
       toast.success(initial ? "Transaction updated" : "Saved");
       onSaved();
     } catch (err) {
@@ -205,6 +196,10 @@ export function TxnForm({
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't attach receipt");
     }
+  }
+
+  if (links) {
+    return <ShareSplitList links={links} currency={currency} onDone={onSaved} />;
   }
 
   return (
@@ -306,13 +301,7 @@ export function TxnForm({
         <Label>Project</Label>
         <Select
           value={projectId || "none"}
-          onValueChange={(v) => {
-            const next = v === "none" ? "" : v;
-            setProjectId(next);
-            setPicked([]);
-            setPickedTouched(false);
-            setVisibility(next === (initial?.projectId ?? "") ? (initial?.visibility ?? "personal") : "personal");
-          }}
+          onValueChange={(v) => setProjectId(v === "none" ? "" : v)}
         >
           <SelectTrigger>
             <SelectValue placeholder="None" />
@@ -328,72 +317,17 @@ export function TxnForm({
         </Select>
       </div>
 
-      {showSplit && (
-        <div className="space-y-2">
-          <Label>Split</Label>
-          <div className="flex gap-1 rounded-lg bg-secondary p-1">
-            {SPLIT_OPTIONS.map((option) => {
-              const locked = option.id !== "personal" && !membersQuery.isPending && people.length < 2;
-              return (
-                <button
-                  key={option.id}
-                  type="button"
-                  disabled={locked}
-                  onClick={() => setVisibility(option.id)}
-                  className={cn(
-                    "h-9 flex-1 rounded-md px-1 text-xs font-medium transition-colors",
-                    visibility === option.id ? "bg-card text-foreground shadow-[var(--elev-shadow)]" : "text-muted-foreground",
-                    locked && "opacity-40",
-                  )}
-                >
-                  {option.label}
-                </button>
-              );
-            })}
-          </div>
-          {visibility === "personal" ? (
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              Only on your budget. Others on this project won’t see it.
-            </p>
-          ) : membersQuery.isPending ? (
-            <p className="text-xs text-muted-foreground">Loading people…</p>
-          ) : people.length < 2 ? (
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              Invite someone on this project before you can split.
-            </p>
-          ) : (
-            <>
-              <div className="flex flex-wrap gap-1.5">
-                {people.map((person) => {
-                  const on = picked.includes(person.userId);
-                  const label = person.userId === me?.id ? "You" : person.name;
-                  return (
-                    <button
-                      key={person.userId}
-                      type="button"
-                      onClick={() => {
-                        setPickedTouched(true);
-                        setPicked(on ? picked.filter((id) => id !== person.userId) : [...picked, person.userId]);
-                      }}
-                      className={cn(
-                        "inline-flex h-9 items-center rounded-full px-3 text-xs font-medium",
-                        on ? "bg-primary text-primary-foreground" : "bg-secondary text-foreground",
-                      )}
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                {splitPreview
-                  ? `Equal · ${splitPreview}. You paid.`
-                  : "Pick at least two people. Split is equal."}
-                {visibility === "private" ? " Only the people you pick can see it." : " This shows on the group."}
-              </p>
-            </>
-          )}
-        </div>
+      {type === "expense" && (
+        <SplitEditor
+          key={`${projectId}:${initial?.id ?? "new"}:${splitQuery.data?.mode ?? "wait"}`}
+          collaborative={collaborative}
+          people={people}
+          meId={me?.id}
+          amount={amount}
+          currency={currency}
+          initial={projectId === (initial?.projectId ?? "") ? (splitQuery.data ?? null) : null}
+          onChange={onSplit}
+        />
       )}
 
       <button

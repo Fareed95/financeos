@@ -5,6 +5,7 @@ import { mapTxn, TXN_FROM, TXN_SELECT } from "@/lib/server/map";
 import { assertNoSettledEdit, readMembers } from "@/lib/server/collab";
 import { parseMoney } from "@/lib/money";
 import { allocateSplits, type SplitMethod } from "@/lib/split";
+import { clearSplitLinks, planOpenParts, saveSplitLinks, type OpenPartInput, type ShareLink } from "@/lib/server/split-links";
 import { publicError } from "@/lib/utils";
 import type { Transaction, TxnFilters, TxnType } from "@/lib/types";
 
@@ -15,7 +16,7 @@ type SplitPlan =
       kind: "group";
       visibility: "shared" | "private";
       method: SplitMethod;
-      allocations: { userId: string; allocated: string }[];
+      allocations: { userId: string; allocated: string; value: string }[];
     };
 
 async function planVisibility(
@@ -43,13 +44,26 @@ async function planVisibility(
   const ids = [...new Set(data.splitUserIds ?? [])].filter((memberId) => allowed.has(memberId));
   if (ids.length < 2) throw new Error("Pick at least two people to split with");
   const method = data.splitMethod ?? "equal";
-  if (method !== "equal") throw new Error("Split this one equally, or add it from the project page for a custom split");
+  if (method !== "equal" && method !== "exact" && method !== "percentage") {
+    throw new Error("Choose equal, amount, or percentage");
+  }
   const allocations = allocateSplits(
     amount,
-    "equal",
-    ids.map((memberId) => ({ userId: memberId, value: "1" })),
+    method,
+    ids.map((memberId) => ({
+      userId: memberId,
+      value: method === "equal" ? "1" : (data.splitValues?.[memberId] ?? "").trim() || "0",
+    })),
   );
-  return { kind: "group", visibility: data.visibility, method: "equal", allocations };
+  return {
+    kind: "group",
+    visibility: data.visibility,
+    method,
+    allocations: allocations.map((row) => ({
+      ...row,
+      value: method === "equal" ? "1" : (data.splitValues?.[row.userId] ?? "").trim() || "0",
+    })),
+  };
 }
 
 async function applyVisibility(
@@ -78,7 +92,7 @@ async function applyVisibility(
   for (const row of plan.allocations) {
     await sql`
       insert into expense_splits (id, transaction_id, user_id, split_method, share_value, allocated_amount)
-      values (${crypto.randomUUID()}, ${id}, ${row.userId}, ${plan.method}, 1::numeric, ${row.allocated}::numeric)
+      values (${crypto.randomUUID()}, ${id}, ${row.userId}, ${plan.method}, ${row.value}::numeric, ${row.allocated}::numeric)
     `;
   }
 }
@@ -107,6 +121,11 @@ export type TxnInput = {
   visibility?: "personal" | "shared" | "private";
   splitMethod?: SplitMethod;
   splitUserIds?: string[];
+  splitValues?: Record<string, string>;
+  splitEmails?: Record<string, string>;
+  splitMode?: "off" | "group" | "open";
+  openParts?: OpenPartInput[];
+  origin?: string;
   receipt?: { fileName: string; mimeType: string; dataUrl: string } | null;
   removeReceipt?: boolean;
 };
@@ -242,7 +261,25 @@ export const upsertTransaction = createServerFn({ method: "POST" })
       await assertTxnRefs(sql, userId, data);
       const amount = parseMoney(data.amount);
       if (amount.startsWith("-") || amount === "0.00") throw new Error("Amount must be greater than zero");
-      const splitPlan = await planVisibility(sql, userId, data, amount);
+      const mode = data.type === "expense" ? data.splitMode : undefined;
+      let openParts = null as ReturnType<typeof planOpenParts> | null;
+      if (mode === "open") {
+        openParts = planOpenParts(amount, data.splitMethod ?? "equal", userId, data.openParts ?? []);
+      }
+      if (mode === "group") {
+        for (const value of Object.values(data.splitEmails ?? {})) {
+          const email = value.trim();
+          if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Enter a valid email");
+        }
+      }
+      const splitPlan =
+        mode === "group"
+          ? await planVisibility(sql, userId, { ...data, visibility: data.visibility ?? "shared" }, amount)
+          : mode === "open" || mode === "off"
+            ? data.projectId
+              ? ({ kind: "personal" } as const)
+              : ({ kind: "none" } as const)
+            : await planVisibility(sql, userId, data, amount);
       const id = data.id ?? crypto.randomUUID();
       const counterparty = data.type === "transfer" ? data.counterpartyAccountId ?? null : null;
 
@@ -306,8 +343,51 @@ export const upsertTransaction = createServerFn({ method: "POST" })
       if (!txn) throw new Error("Could not save transaction");
       await applyVisibility(sql, userId, id, splitPlan);
 
+      let shareLinks: ShareLink[] = [];
+      if (data.type !== "expense") {
+        await clearSplitLinks(sql, id, userId);
+      } else if (mode === "off") {
+        await clearSplitLinks(sql, id, userId);
+      } else if (mode === "open" && openParts) {
+        await sql`
+          update transactions set visibility = 'personal', paid_by_user_id = ${userId}, affects_ledger = true
+          where id = ${id} and user_id = ${userId}
+        `;
+        shareLinks = await saveSplitLinks(
+          sql,
+          userId,
+          id,
+          data.splitMethod ?? "equal",
+          openParts,
+          data.origin,
+          data.description ?? null,
+        );
+      } else if (mode === "group" && splitPlan.kind === "group") {
+        const names = new Map<string, string>();
+        if (data.projectId) {
+          const group = await readMembers(sql, userId, data.projectId);
+          for (const member of group.members) names.set(member.userId, member.name);
+        }
+        shareLinks = await saveSplitLinks(
+          sql,
+          userId,
+          id,
+          splitPlan.method,
+          splitPlan.allocations.map((row) => ({
+            userId: row.userId,
+            name: row.userId === userId ? "You" : names.get(row.userId) || "Member",
+            email: data.splitEmails?.[row.userId]?.trim() || null,
+            value: row.value,
+            allocated: row.allocated,
+            status: "accepted" as const,
+          })),
+          data.origin,
+          data.description ?? null,
+        );
+      }
+
       const saved = await fetchTxn(sql, userId, id);
-      return saved ?? txn;
+      return { ...(saved ?? txn), shareLinks };
     } catch (err) {
       publicError(err, "Couldn't save that transaction.");
     }

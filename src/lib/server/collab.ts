@@ -6,6 +6,7 @@ import type { Sql } from "@/lib/db";
 import type { Project } from "@/lib/types";
 import { fromCents, parseMoney, subMoney, toCents } from "@/lib/money";
 import { publicError } from "@/lib/utils";
+import { planOpenParts, saveSplitLinks, type ShareLink } from "@/lib/server/split-links";
 import {
   allocateSplits,
   applyExpense,
@@ -515,13 +516,58 @@ export const addProjectExpense = createServerFn({ method: "POST" })
       paidByUserId?: string;
       method?: SplitMethod;
       parts?: { userId: string; value: string }[];
+      origin?: string;
+      emails?: Record<string, string>;
+      guests?: { name: string; email?: string; value?: string }[];
     }) => data,
   )
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
-      const saved = await writeSplitExpense(sql, context.userId, data);
-      return { id: saved.id };
+      const userId = context.userId;
+      const guests = (data.guests ?? []).filter((guest) => guest.name?.trim());
+      const payer = data.paidByUserId || userId;
+      if (guests.length) {
+        if (payer !== userId) throw new Error("You can send a split link when you paid");
+        if (data.visibility === "personal") throw new Error("Pick a split, or leave the extra person off");
+        const group = await readMembers(sql, userId, data.projectId);
+        const names = new Map(group.members.map((member) => [member.userId, member.name]));
+        const open = planOpenParts(parseMoney(data.amount), data.method ?? "equal", userId, [
+          ...(data.parts ?? []).map((part) => ({
+            userId: part.userId,
+            name: part.userId === userId ? "You" : names.get(part.userId) || "Member",
+            email: data.emails?.[part.userId] || null,
+            value: part.value,
+          })),
+          ...guests.map((guest) => ({ name: guest.name, email: guest.email || null, value: guest.value || null })),
+        ]);
+        const saved = await writeSplitExpense(sql, userId, { ...data, visibility: "personal", parts: [] });
+        const shareLinks = await saveSplitLinks(sql, userId, saved.id, data.method ?? "equal", open, data.origin, data.description ?? null);
+        return { id: saved.id, shareLinks };
+      }
+      const saved = await writeSplitExpense(sql, userId, data);
+      let shareLinks: ShareLink[] = [];
+      if (data.visibility !== "personal" && payer === userId) {
+        const group = await readMembers(sql, userId, data.projectId);
+        const names = new Map(group.members.map((member) => [member.userId, member.name]));
+        shareLinks = await saveSplitLinks(
+          sql,
+          userId,
+          saved.id,
+          data.method ?? "equal",
+          saved.allocations.map((row) => ({
+            userId: row.userId,
+            name: row.userId === userId ? "You" : names.get(row.userId) || "Member",
+            email: data.emails?.[row.userId]?.trim() || null,
+            value: (data.parts ?? []).find((part) => part.userId === row.userId)?.value || "1",
+            allocated: row.allocated,
+            status: "accepted" as const,
+          })),
+          data.origin,
+          data.description ?? null,
+        );
+      }
+      return { id: saved.id, shareLinks };
     } catch (err) {
       publicError(err, "Couldn't add that expense.");
     }

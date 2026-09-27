@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAppData } from "@/components/data-provider";
 import { BudgetBar } from "@/components/finance/budget-bar";
 import { EmptyState } from "@/components/finance/empty-state";
@@ -7,9 +8,11 @@ import { TxnEditSheet } from "@/components/finance/txn-edit-sheet";
 import { InstallAppCard } from "@/components/install-app";
 import { useQuickAdd } from "@/components/finance/quick-add";
 import { formatMoney, isNegative, percentUsed } from "@/lib/money";
+import { listMySplits, markSplitSettled } from "@/lib/server/split-links";
 import { monthLabel } from "@/lib/utils";
 import { ArrowLeftRight, FolderKanban } from "lucide-react";
 import { useState } from "react";
+import { toast } from "sonner";
 import type { Transaction } from "@/lib/types";
 
 export const Route = createFileRoute("/_app/")({ component: Home });
@@ -18,6 +21,8 @@ function Home() {
   const { data, currency, from } = useAppData();
   const { openAdd } = useQuickAdd();
   const [edit, setEdit] = useState<Transaction | null>(null);
+  const splits = useQuery({ queryKey: ["my-splits"], queryFn: () => listMySplits() });
+  const qc = useQueryClient();
   if (!data) return null;
 
   const { stats, projects, budgets, recent, accounts } = data;
@@ -47,6 +52,39 @@ function Home() {
         <Stat label="Expenses" value={formatMoney(stats.expense, currency)} tone="text-expense" />
         <Stat label="Savings" value={formatMoney(stats.savings, currency)} />
       </section>
+
+      {(splits.data?.length ?? 0) > 0 && (
+        <section className="space-y-2">
+          <h2 className="text-sm font-medium">Splits</h2>
+          {splits.data?.map((row) => (
+            <div key={row.id} className="flex items-center gap-3 rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium">
+                  {row.direction === "out" ? `${row.name} owes you` : `You owe ${row.name}`}
+                </p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {row.description || "Expense"}
+                  {row.status === "pending" ? " · link not opened yet" : ""}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="tabular text-sm font-medium">{formatMoney(row.amount, currency)}</p>
+                <button
+                  type="button"
+                  className="text-xs text-muted-foreground underline-offset-4 hover:underline"
+                  onClick={() => {
+                    void markSplitSettled({ data: { id: row.id } })
+                      .then(() => qc.invalidateQueries({ queryKey: ["my-splits"] }))
+                      .catch((err) => toast.error(err instanceof Error ? err.message : "Couldn't update"));
+                  }}
+                >
+                  Paid
+                </button>
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
 
       {monthBudget && (
         <section className="fos-enter fos-enter-delay-2 rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
