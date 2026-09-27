@@ -35,6 +35,10 @@ export const getBootstrap = createServerFn({ method: "POST" })
           sql.query<Record<string, unknown>>(
             `select ${PROJECT_SELECT} ${PROJECT_FROM}
              where p.user_id = $1
+                or exists (
+                  select 1 from project_members m
+                  where m.project_id = p.id and m.user_id = $1 and m.status = 'active'
+                )
              order by case p.status when 'active' then 0 when 'planned' then 1 when 'completed' then 2 else 3 end, p.created_at desc`,
             [userId],
           ),

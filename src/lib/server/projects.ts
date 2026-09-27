@@ -122,7 +122,7 @@ export const getProjectDetail = createServerFn({ method: "POST" })
     try {
       const { sql } = await ensureUser(context.userId);
       const rows = await sql.query<Record<string, unknown>>(
-        `select ${PROJECT_SELECT} ${PROJECT_FROM}
+        `select ${PROJECT_SELECT}, p.user_id as owner_id ${PROJECT_FROM}
          where p.id = $1 and (
            p.user_id = $2 or exists (
              select 1 from project_members m
@@ -272,6 +272,7 @@ export const getProjectDetail = createServerFn({ method: "POST" })
 
       return {
         project,
+        viewerRole: String(rows[0].owner_id) === context.userId ? "owner" as const : "member" as const,
         transactions: txns.map(mapTxn),
         insights,
         projectBudgets: projectBudgets.map((r) => ({

@@ -55,6 +55,7 @@ function ProjectsPage() {
                 <p className="font-medium">{p.name}</p>
                 <p className="text-xs text-muted-foreground">
                   {PROJECT_TYPE_LABELS[p.projectType]} · {PROJECT_STATUS_LABELS[p.status]}
+                  {p.collaboration === "collaborative" ? " · Shared" : ""}
                 </p>
               </div>
               <BudgetBar

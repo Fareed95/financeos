@@ -56,7 +56,8 @@ function ProjectDetail() {
     return <p className="pt-8 text-sm text-expense">Couldn't load this project.</p>;
   }
 
-  const { project, insights, transactions } = q.data;
+  const { project, insights, transactions, viewerRole } = q.data;
+  const isOwner = viewerRole === "owner";
   const isTrip = project.projectType === "trip";
   const remainingNegative = isNegative(insights.remaining);
   const catTotal = insights.categoryBreakdown.reduce((sum, row) => addMoney(sum, row.amount), "0.00");
@@ -80,9 +81,11 @@ function ProjectDetail() {
               : ""}
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => setEdit(true)}>
-          Edit
-        </Button>
+        {isOwner && (
+          <Button variant="outline" size="sm" onClick={() => setEdit(true)}>
+            Edit
+          </Button>
+        )}
       </div>
 
       {isTrip ? (
@@ -122,7 +125,7 @@ function ProjectDetail() {
             {formatMoney(insights.netCost, currency)}
           </p>
         )}
-        {project.collaboration === "collaborative" && (
+        {project.collaboration === "collaborative" && !isZero(shownSpend) && (
           <p className="mt-3 text-sm text-muted-foreground">
             {isZero(insights.sharedSpend)
               ? "This is what you spent on this project. It is not split with anyone."
@@ -222,9 +225,11 @@ function ProjectDetail() {
         )}
       </section>
 
-      <Button variant="ghost" className="text-expense" onClick={() => setRemove(true)}>
-        Delete project
-      </Button>
+      {isOwner && (
+        <Button variant="ghost" className="text-expense" onClick={() => setRemove(true)}>
+          Delete project
+        </Button>
+      )}
 
       <TxnEditSheet txn={txn} onClose={() => setTxn(null)} />
 

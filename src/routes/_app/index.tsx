@@ -93,7 +93,10 @@ function Home() {
               >
                 <div className="flex items-baseline justify-between gap-3">
                   <p className="font-medium">{p.name}</p>
-                  <p className="text-xs text-muted-foreground capitalize">{p.projectType}</p>
+                  <p className="text-xs text-muted-foreground capitalize">
+                    {p.projectType}
+                    {p.collaboration === "collaborative" ? " · Shared" : ""}
+                  </p>
                 </div>
                 <BudgetBar
                   className="mt-3"

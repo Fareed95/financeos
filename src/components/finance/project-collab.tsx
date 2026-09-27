@@ -129,6 +129,11 @@ export function ProjectCollab({ projectId }: { projectId: string }) {
         payments={balances.data?.payments ?? []}
         privatePayments={balances.data?.privatePayments ?? []}
         quiet={settled && (balances.data?.payments ?? []).length === 0 && (balances.data?.privatePayments ?? []).length === 0 && (!spend || isZero(spend.sharedSpend))}
+        quietNote={
+          spend && !isZero(spend.personalSpend)
+            ? "Nothing shared yet. Your own expenses still come out of the budget above."
+            : "Nothing shared yet."
+        }
         onAdd={() => setExpenseOpen(true)}
         onSettle={() => setSettleOpen(true)}
       />
@@ -514,6 +519,7 @@ function BalanceCard({
   payments,
   privatePayments,
   quiet,
+  quietNote,
   onAdd,
   onSettle,
 }: {
@@ -524,15 +530,14 @@ function BalanceCard({
   payments: { fromUserId: string; toUserId: string; fromName: string; toName: string; amount: string }[];
   privatePayments: { fromUserId: string; toUserId: string; fromName: string; toName: string; amount: string }[];
   quiet: boolean;
+  quietNote: string;
   onAdd: () => void;
   onSettle: () => void;
 }) {
   return (
     <div className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
       {quiet ? (
-        <p className="text-sm text-muted-foreground">
-          Nothing shared yet. Your own expenses still come out of the budget above.
-        </p>
+        <p className="text-sm text-muted-foreground">{quietNote}</p>
       ) : (
         <>
           <p className="text-sm text-muted-foreground">

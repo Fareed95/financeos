@@ -2,10 +2,86 @@ import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { ensureUser, ownedAccount, ownedCategory, ownedProject } from "@/lib/server/ensure";
 import { mapTxn, TXN_FROM, TXN_SELECT } from "@/lib/server/map";
-import { assertNoSettledEdit } from "@/lib/server/collab";
+import { assertNoSettledEdit, readMembers } from "@/lib/server/collab";
 import { parseMoney } from "@/lib/money";
+import { allocateSplits, type SplitMethod } from "@/lib/split";
 import { publicError } from "@/lib/utils";
 import type { Transaction, TxnFilters, TxnType } from "@/lib/types";
+
+type SplitPlan =
+  | { kind: "none" }
+  | { kind: "personal" }
+  | {
+      kind: "group";
+      visibility: "shared" | "private";
+      method: SplitMethod;
+      allocations: { userId: string; allocated: string }[];
+    };
+
+async function planVisibility(
+  sql: Awaited<ReturnType<typeof ensureUser>>["sql"],
+  userId: string,
+  data: TxnInput,
+  amount: string,
+): Promise<SplitPlan> {
+  if (data.type !== "expense" || !data.projectId || !data.visibility) return { kind: "none" };
+  if (data.visibility === "personal") return { kind: "personal" };
+  if (data.visibility !== "shared" && data.visibility !== "private") {
+    throw new Error("Choose how to split this expense");
+  }
+  const group = await readMembers(sql, userId, data.projectId);
+  if (group.collaboration !== "collaborative") {
+    throw new Error("Invite someone before splitting this project");
+  }
+  const settled = await sql<{ id: string }>`
+    select id from settlements where project_id = ${data.projectId} and status = 'completed' limit 1
+  `;
+  if (settled[0]) {
+    throw new Error("This project already has a settlement. Add a new shared expense instead.");
+  }
+  const allowed = new Set(group.members.map((member) => member.userId));
+  const ids = [...new Set(data.splitUserIds ?? [])].filter((memberId) => allowed.has(memberId));
+  if (ids.length < 2) throw new Error("Pick at least two people to split with");
+  const method = data.splitMethod ?? "equal";
+  if (method !== "equal") throw new Error("Split this one equally, or add it from the project page for a custom split");
+  const allocations = allocateSplits(
+    amount,
+    "equal",
+    ids.map((memberId) => ({ userId: memberId, value: "1" })),
+  );
+  return { kind: "group", visibility: data.visibility, method: "equal", allocations };
+}
+
+async function applyVisibility(
+  sql: Awaited<ReturnType<typeof ensureUser>>["sql"],
+  userId: string,
+  id: string,
+  plan: SplitPlan,
+) {
+  if (plan.kind === "none") return;
+  if (plan.kind === "personal") {
+    await sql`
+      update transactions set visibility = 'personal', paid_by_user_id = ${userId}, affects_ledger = true
+      where id = ${id} and user_id = ${userId}
+    `;
+    await sql`delete from expense_splits where transaction_id = ${id}`;
+    return;
+  }
+  await sql`
+    update transactions set
+      visibility = ${plan.visibility},
+      paid_by_user_id = ${userId},
+      affects_ledger = true
+    where id = ${id} and user_id = ${userId}
+  `;
+  await sql`delete from expense_splits where transaction_id = ${id}`;
+  for (const row of plan.allocations) {
+    await sql`
+      insert into expense_splits (id, transaction_id, user_id, split_method, share_value, allocated_amount)
+      values (${crypto.randomUUID()}, ${id}, ${row.userId}, ${plan.method}, 1::numeric, ${row.allocated}::numeric)
+    `;
+  }
+}
 
 const SORTS: Record<NonNullable<TxnFilters["sort"]>, string> = {
   newest: "t.transaction_date desc, t.created_at desc",
@@ -28,6 +104,9 @@ export type TxnInput = {
   notes?: string | null;
   isPrepaid?: boolean;
   isCommitted?: boolean;
+  visibility?: "personal" | "shared" | "private";
+  splitMethod?: SplitMethod;
+  splitUserIds?: string[];
   receipt?: { fileName: string; mimeType: string; dataUrl: string } | null;
   removeReceipt?: boolean;
 };
@@ -163,6 +242,7 @@ export const upsertTransaction = createServerFn({ method: "POST" })
       await assertTxnRefs(sql, userId, data);
       const amount = parseMoney(data.amount);
       if (amount.startsWith("-") || amount === "0.00") throw new Error("Amount must be greater than zero");
+      const splitPlan = await planVisibility(sql, userId, data, amount);
       const id = data.id ?? crypto.randomUUID();
       const counterparty = data.type === "transfer" ? data.counterpartyAccountId ?? null : null;
 
@@ -224,7 +304,10 @@ export const upsertTransaction = createServerFn({ method: "POST" })
 
       const txn = await fetchTxn(sql, userId, id);
       if (!txn) throw new Error("Could not save transaction");
-      return txn;
+      await applyVisibility(sql, userId, id, splitPlan);
+
+      const saved = await fetchTxn(sql, userId, id);
+      return saved ?? txn;
     } catch (err) {
       publicError(err, "Couldn't save that transaction.");
     }

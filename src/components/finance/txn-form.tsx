@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -7,12 +8,23 @@ import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { CategoryIcon } from "@/components/finance/icons";
 import { useAppData } from "@/components/data-provider";
+import { useCurrentUser } from "@/lib/auth/use-current-user";
 import { compressReceipt } from "@/lib/receipt";
-import { parseMoney } from "@/lib/money";
+import { formatMoney, parseMoney } from "@/lib/money";
+import { allocateSplits } from "@/lib/split";
+import { listProjectMembers } from "@/lib/server/collab";
 import { cn, todayISO } from "@/lib/utils";
 import type { Transaction, TxnType } from "@/lib/types";
 import type { TxnInput } from "@/lib/server/transactions";
 import { toast } from "sonner";
+
+const SPLIT_OPTIONS = [
+  { id: "personal", label: "Just mine" },
+  { id: "shared", label: "With group" },
+  { id: "private", label: "Private" },
+] as const;
+
+type Visibility = (typeof SPLIT_OPTIONS)[number]["id"];
 
 const TYPES: { id: TxnType; label: string }[] = [
   { id: "expense", label: "Expense" },
@@ -40,7 +52,8 @@ export function TxnForm({
   onSaved: () => void;
   onCancel?: () => void;
 }) {
-  const { data, saveTxn, today } = useAppData();
+  const { data, saveTxn, currency } = useAppData();
+  const me = useCurrentUser();
   const accounts = (data?.accounts ?? []).filter((a) => a.isActive);
   const categories = data?.categories ?? [];
   const projects = (data?.projects ?? []).filter((p) => p.status !== "archived");
@@ -60,6 +73,9 @@ export function TxnForm({
   const [removeReceipt, setRemoveReceipt] = useState(false);
   const [busy, setBusy] = useState(false);
   const [more, setMore] = useState(Boolean(initial));
+  const [visibility, setVisibility] = useState<Visibility>(initial?.visibility ?? "personal");
+  const [picked, setPicked] = useState<string[]>([]);
+  const [pickedTouched, setPickedTouched] = useState(false);
 
   useEffect(() => {
     if (defaults?.categoryName && !initial) {
@@ -73,6 +89,55 @@ export function TxnForm({
   useEffect(() => {
     if (!accountId && accounts[0]) setAccountId(accounts[0].id);
   }, [accountId, accounts]);
+
+  const selectedProject = projects.find((p) => p.id === projectId);
+  const showSplit = type === "expense" && selectedProject?.collaboration === "collaborative";
+  const membersQuery = useQuery({
+    queryKey: ["project-members", projectId],
+    queryFn: () => listProjectMembers({ data: { projectId } }),
+    enabled: showSplit && Boolean(projectId),
+  });
+  const people = useMemo(() => {
+    const seen = new Set<string>();
+    return (membersQuery.data?.members ?? []).filter((person) => {
+      if (seen.has(person.userId)) return false;
+      seen.add(person.userId);
+      return true;
+    });
+  }, [membersQuery.data]);
+
+  useEffect(() => {
+    if (!showSplit || pickedTouched) return;
+    const ids = people.map((person) => person.userId);
+    if (ids.length === 0) return;
+    setPicked((prev) => (prev.length === ids.length && prev.every((id, i) => id === ids[i]) ? prev : ids));
+  }, [showSplit, pickedTouched, people]);
+
+  const splitPreview = useMemo(() => {
+    if (!showSplit || visibility === "personal" || picked.length < 2) return "";
+    try {
+      const total = parseMoney(amount);
+      const allocations = allocateSplits(
+        total,
+        "equal",
+        picked.map((id) => ({ userId: id, value: "1" })),
+      );
+      const ordered = [...allocations].sort((a, b) => {
+        if (a.userId === me?.id) return -1;
+        if (b.userId === me?.id) return 1;
+        return 0;
+      });
+      return ordered
+        .map((row) => {
+          const person = people.find((item) => item.userId === row.userId);
+          const label = row.userId === me?.id ? "You" : person?.name || "Member";
+          return `${label} ${formatMoney(row.allocated, currency)}`;
+        })
+        .join(" · ");
+    } catch {
+      return "";
+    }
+  }, [showSplit, visibility, picked, amount, people, me?.id, currency]);
 
   const visibleCats = useMemo(() => {
     const want = type === "income" || type === "refund" ? "income" : "expense";
@@ -92,6 +157,10 @@ export function TxnForm({
       toast.error(err instanceof Error ? err.message : "Enter a valid amount");
       return;
     }
+    if (showSplit && visibility !== "personal" && picked.length < 2) {
+      toast.error(people.length < 2 ? "Invite someone before splitting this project" : "Pick at least two people to split with");
+      return;
+    }
     setBusy(true);
     try {
       const payload: TxnInput = {
@@ -107,6 +176,13 @@ export function TxnForm({
         notes: notes.trim() || null,
         isPrepaid: prepaid,
         isCommitted: committed,
+        ...(showSplit
+          ? {
+              visibility,
+              splitMethod: "equal" as const,
+              splitUserIds: visibility === "personal" ? undefined : picked,
+            }
+          : {}),
         receipt,
         removeReceipt,
       };
@@ -228,7 +304,16 @@ export function TxnForm({
 
       <div className="space-y-2">
         <Label>Project</Label>
-        <Select value={projectId || "none"} onValueChange={(v) => setProjectId(v === "none" ? "" : v)}>
+        <Select
+          value={projectId || "none"}
+          onValueChange={(v) => {
+            const next = v === "none" ? "" : v;
+            setProjectId(next);
+            setPicked([]);
+            setPickedTouched(false);
+            setVisibility(next === (initial?.projectId ?? "") ? (initial?.visibility ?? "personal") : "personal");
+          }}
+        >
           <SelectTrigger>
             <SelectValue placeholder="None" />
           </SelectTrigger>
@@ -242,6 +327,74 @@ export function TxnForm({
           </SelectContent>
         </Select>
       </div>
+
+      {showSplit && (
+        <div className="space-y-2">
+          <Label>Split</Label>
+          <div className="flex gap-1 rounded-lg bg-secondary p-1">
+            {SPLIT_OPTIONS.map((option) => {
+              const locked = option.id !== "personal" && !membersQuery.isPending && people.length < 2;
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  disabled={locked}
+                  onClick={() => setVisibility(option.id)}
+                  className={cn(
+                    "h-9 flex-1 rounded-md px-1 text-xs font-medium transition-colors",
+                    visibility === option.id ? "bg-card text-foreground shadow-[var(--elev-shadow)]" : "text-muted-foreground",
+                    locked && "opacity-40",
+                  )}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+          {visibility === "personal" ? (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Only on your budget. Others on this project won’t see it.
+            </p>
+          ) : membersQuery.isPending ? (
+            <p className="text-xs text-muted-foreground">Loading people…</p>
+          ) : people.length < 2 ? (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Invite someone on this project before you can split.
+            </p>
+          ) : (
+            <>
+              <div className="flex flex-wrap gap-1.5">
+                {people.map((person) => {
+                  const on = picked.includes(person.userId);
+                  const label = person.userId === me?.id ? "You" : person.name;
+                  return (
+                    <button
+                      key={person.userId}
+                      type="button"
+                      onClick={() => {
+                        setPickedTouched(true);
+                        setPicked(on ? picked.filter((id) => id !== person.userId) : [...picked, person.userId]);
+                      }}
+                      className={cn(
+                        "inline-flex h-9 items-center rounded-full px-3 text-xs font-medium",
+                        on ? "bg-primary text-primary-foreground" : "bg-secondary text-foreground",
+                      )}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {splitPreview
+                  ? `Equal · ${splitPreview}. You paid.`
+                  : "Pick at least two people. Split is equal."}
+                {visibility === "private" ? " Only the people you pick can see it." : " This shows on the group."}
+              </p>
+            </>
+          )}
+        </div>
+      )}
 
       <button
         type="button"
