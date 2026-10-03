@@ -1,6 +1,6 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import { useAppData } from "@/components/data-provider";
 import { adviceCopy } from "@/components/finance/money-in-home";
@@ -79,6 +79,16 @@ function IncomePage() {
   }
 
   const snapshot = plan.data;
+  const hash = useRouterState({ select: (s) => s.location.hash });
+
+  useEffect(() => {
+    const id = hash.replace(/^#/, "");
+    if (!id) return;
+    const timer = window.setTimeout(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+    return () => window.clearTimeout(timer);
+  }, [hash, snapshot]);
 
   return (
     <div className="space-y-8 pt-4">
@@ -113,7 +123,57 @@ function IncomePage() {
         </section>
       )}
 
-      <section className="space-y-3">
+      <section id="income" className="scroll-mt-24 space-y-3">
+        {snapshot && snapshot.sources.length > 0 && (
+          <div className="space-y-2">
+            <h2 className="text-sm font-medium">Your payouts</h2>
+            {snapshot.sources.map((source) => (
+              <div key={source.id} className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
+                <div className="flex items-baseline justify-between gap-3">
+                  <p className={cn("font-medium", !source.isActive && "text-muted-foreground")}>{source.name}</p>
+                  <p className="tabular text-sm">{formatMoney(source.amount, currency)}</p>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {source.kind === "salary" ? "Salary" : source.kind === "asset" ? "Asset" : "Other"} · {ordinal(source.dayOfMonth)} · {source.accountName}
+                  {!source.isActive ? " · Paused" : source.checkin === "credited" ? " · Credited" : source.checkin === "skipped" ? " · Skipped" : ""}
+                </p>
+                <div className="mt-3 flex flex-wrap gap-3 text-xs">
+                  <button
+                    type="button"
+                    className="text-muted-foreground underline-offset-4 hover:underline"
+                    onClick={() => {
+                      setEditing(source.id);
+                      setName(source.name);
+                      setKind(source.kind);
+                      setAmount(source.amount.replace(/\.00$/, ""));
+                      setDay(String(source.dayOfMonth));
+                      setAccountId(source.accountId);
+                    }}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    className="text-muted-foreground underline-offset-4 hover:underline"
+                    onClick={() => void run("update", () => setIncomeActive({ data: { id: source.id, isActive: !source.isActive } }))}
+                  >
+                    {source.isActive ? "Pause" : "Resume"}
+                  </button>
+                  <button
+                    type="button"
+                    className="text-muted-foreground underline-offset-4 hover:underline"
+                    onClick={() => {
+                      if (!window.confirm(`Remove ${source.name}? Past income entries stay.`)) return;
+                      void run("remove", () => deleteIncomeSource({ data: { id: source.id } }));
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         <h2 className="text-sm font-medium">{editing ? "Edit income" : "Add income"}</h2>
         {accounts.length === 0 ? (
           <p className="rounded-xl bg-card p-4 text-sm text-muted-foreground shadow-[var(--elev-shadow)]">
@@ -207,57 +267,6 @@ function IncomePage() {
           </form>
         )}
       </section>
-
-      {snapshot && snapshot.sources.length > 0 && (
-        <section className="space-y-2">
-          <h2 className="text-sm font-medium">Your payouts</h2>
-          {snapshot.sources.map((source) => (
-            <div key={source.id} className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
-              <div className="flex items-baseline justify-between gap-3">
-                <p className={cn("font-medium", !source.isActive && "text-muted-foreground")}>{source.name}</p>
-                <p className="tabular text-sm">{formatMoney(source.amount, currency)}</p>
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {source.kind === "salary" ? "Salary" : source.kind === "asset" ? "Asset" : "Other"} · {ordinal(source.dayOfMonth)} · {source.accountName}
-                {!source.isActive ? " · Paused" : source.checkin === "credited" ? " · Credited" : source.checkin === "skipped" ? " · Skipped" : ""}
-              </p>
-              <div className="mt-3 flex flex-wrap gap-3 text-xs">
-                <button
-                  type="button"
-                  className="text-muted-foreground underline-offset-4 hover:underline"
-                  onClick={() => {
-                    setEditing(source.id);
-                    setName(source.name);
-                    setKind(source.kind);
-                    setAmount(source.amount.replace(/\.00$/, ""));
-                    setDay(String(source.dayOfMonth));
-                    setAccountId(source.accountId);
-                  }}
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  className="text-muted-foreground underline-offset-4 hover:underline"
-                  onClick={() => void run("update", () => setIncomeActive({ data: { id: source.id, isActive: !source.isActive } }))}
-                >
-                  {source.isActive ? "Pause" : "Resume"}
-                </button>
-                <button
-                  type="button"
-                  className="text-muted-foreground underline-offset-4 hover:underline"
-                  onClick={() => {
-                    if (!window.confirm(`Remove ${source.name}? Past income entries stay.`)) return;
-                    void run("remove", () => deleteIncomeSource({ data: { id: source.id } }));
-                  }}
-                >
-                  Remove
-                </button>
-              </div>
-            </div>
-          ))}
-        </section>
-      )}
 
       {snapshot && (
         <CommitmentsPanel

@@ -10,6 +10,7 @@ import { answerBill } from "@/lib/server/commitments";
 import { notifyCutReminders } from "@/lib/bill-reminders";
 import { formatMoney, isPositive, isZero } from "@/lib/money";
 import { ordinal, type Advice } from "@/lib/month-plan";
+import type { IncomePlan } from "@/lib/server/income";
 import { cn } from "@/lib/utils";
 
 export function adviceCopy(item: Advice, currency: string): { title: string; detail: string } {
@@ -92,8 +93,9 @@ export function MoneyInHome() {
     );
   }, [plan.data, today, currency]);
 
-  if (plan.isError) return null;
-  if (!plan.data) return null;
+  if (plan.isError || !plan.data) {
+    return <MonthShortcuts />;
+  }
   const data = plan.data;
   const lead = data.advice[0];
   const loggedToday = isPositive(data.todaySpent);
@@ -131,6 +133,8 @@ export function MoneyInHome() {
 
   return (
     <div className="space-y-3">
+      <MonthShortcuts />
+      <ActiveMonth data={data} currency={currency} />
       {data.billPrompts.map((prompt) => (
         <section key={prompt.billId} className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
           <p className="text-xs tracking-wide text-muted-foreground uppercase">
@@ -245,5 +249,98 @@ export function MoneyInHome() {
         )}
       </section>
     </div>
+  );
+}
+
+function MonthShortcuts() {
+  const items = [
+    { hash: "income", label: "Salary" },
+    { hash: "bills", label: "EMI & bills" },
+    { hash: "assets", label: "What I own" },
+  ];
+  return (
+    <div className="grid grid-cols-3 gap-2">
+      {items.map((item) => (
+        <Link
+          key={item.hash}
+          to="/income"
+          hash={item.hash}
+          className="rounded-xl bg-card px-2 py-3 text-center text-sm font-medium shadow-[var(--elev-shadow)]"
+        >
+          {item.label}
+        </Link>
+      ))}
+    </div>
+  );
+}
+
+function kindLabel(kind: string) {
+  if (kind === "salary") return "Salary";
+  if (kind === "asset") return "Payout";
+  if (kind === "emi") return "EMI";
+  if (kind === "rent") return "Rent";
+  if (kind === "subscription") return "Subscription";
+  if (kind === "bill") return "Bill";
+  if (kind === "vehicle") return "Vehicle";
+  if (kind === "property") return "Property";
+  if (kind === "gadget") return "Gadget";
+  return "Other";
+}
+
+function ActiveMonth({ data, currency }: { data: IncomePlan; currency: string }) {
+  const rows = [
+    ...data.sources.map((source) => ({
+      id: source.id,
+      hash: "income",
+      name: source.name,
+      amount: formatMoney(source.amount, currency),
+      meta: `${kindLabel(source.kind)} · lands the ${ordinal(source.dayOfMonth)}`,
+      state: !source.isActive ? "Paused" : source.checkin === "credited" ? "Credited" : source.checkin === "skipped" ? "Skipped" : "Waiting",
+      quiet: !source.isActive,
+    })),
+    ...data.bills.map((bill) => ({
+      id: bill.id,
+      hash: "bills",
+      name: bill.name,
+      amount: formatMoney(bill.amount, currency),
+      meta: `${kindLabel(bill.kind)} · cuts the ${ordinal(bill.dayOfMonth)}`,
+      state: !bill.isActive ? "Paused" : bill.checkin === "paid" ? "Deducted" : bill.checkin === "skipped" ? "Skipped" : "Waiting",
+      quiet: !bill.isActive,
+    })),
+    ...data.assets.map((asset) => ({
+      id: asset.id,
+      hash: "assets",
+      name: asset.name,
+      amount: formatMoney(asset.bookValue, currency),
+      meta: `${kindLabel(asset.kind)} · worth now`,
+      state: !asset.isActive ? "Sold" : asset.finished ? "Written down" : "Active",
+      quiet: !asset.isActive,
+    })),
+  ];
+  if (rows.length === 0) return null;
+  return (
+    <section className="rounded-xl bg-card shadow-[var(--elev-shadow)]">
+      <div className="flex items-center justify-between px-4 pt-4">
+        <p className="text-xs tracking-wide text-muted-foreground uppercase">Already set</p>
+        <Link to="/income" className="text-xs text-muted-foreground underline-offset-4 hover:underline">
+          Edit
+        </Link>
+      </div>
+      <ul className="mt-1">
+        {rows.map((row) => (
+          <li key={row.id} className="border-t border-white/10 first:border-t-0">
+            <Link to="/income" hash={row.hash} className="flex items-center justify-between gap-3 px-4 py-3">
+              <span className="min-w-0">
+                <span className={cn("block truncate text-sm font-medium", row.quiet && "text-muted-foreground")}>{row.name}</span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  {row.meta} · {row.state}
+                </span>
+              </span>
+              <span className="shrink-0 text-sm tabular">{row.amount}</span>
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }

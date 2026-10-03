@@ -11,11 +11,12 @@ import {
   writeSettlement,
   writeSplitExpense,
 } from "@/lib/server/collab";
-import { addMoney, cmpMoney, parseMoney, subMoney } from "@/lib/money";
+import { addMoney, cmpMoney, parseMoney, subMoney, toCents } from "@/lib/money";
 import { matchMember } from "@/lib/member-match";
 import { addDaysISO, publicError } from "@/lib/utils";
 import type { Sql } from "@/lib/db";
 import type { AccountType, BudgetPeriod, ProjectStatus, ProjectType, TxnType } from "@/lib/types";
+import { defaultUsefulYears } from "@/lib/server/commitments";
 import type { SplitMethod } from "@/lib/split";
 
 export type AssistantAction = { tool: string; summary: string; ok: boolean };
@@ -365,6 +366,101 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "set_monthly_income",
+      description:
+        "Save money that lands every month: salary, rent received, FD, or another payout. Does not post cash until mark_income with credited. Do not use add_transaction for a repeating salary.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Short English name, e.g. Salary." },
+          kind: { type: "string", enum: ["salary", "asset", "other"] },
+          amount: { type: "string" },
+          day: { type: "integer", description: "Day of month it lands, 1–31." },
+          account: { type: "string", description: "Account name. Omit only if there is one account." },
+        },
+        required: ["name", "kind", "amount", "day"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "set_monthly_bill",
+      description:
+        "Save money that leaves every month: EMI, rent you pay, subscription, or bill. The day is when it is deducted. Does not post an expense until mark_bill with paid.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Short English name, e.g. YouTube." },
+          kind: { type: "string", enum: ["emi", "rent", "subscription", "bill", "other"] },
+          amount: { type: "string" },
+          day: { type: "integer", description: "Day of month it is deducted, 1–31." },
+          account: { type: "string", description: "Account the money leaves. Omit only if there is one account." },
+        },
+        required: ["name", "kind", "amount", "day"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "set_owned_asset",
+      description:
+        "Record something they own (bike, house, phone) and its straight-line drop in value. Paper only. Never posts an expense and never changes spendable cash.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          kind: { type: "string", enum: ["vehicle", "property", "gadget", "other"] },
+          purchase_amount: { type: "string" },
+          salvage_amount: { type: "string", description: "What it is worth at the end. Default 0." },
+          purchase_date: { type: "string", description: "YYYY-MM-DD. Default today." },
+          useful_years: { type: "integer", description: "1–40. Default depends on kind." },
+        },
+        required: ["name", "kind", "purchase_amount"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mark_income",
+      description:
+        "Answer this month's payday for a saved income. credited posts the income once. not_yet asks again tomorrow. skip skips this month.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Income name or id from the snapshot." },
+          action: { type: "string", enum: ["credited", "not_yet", "skip"] },
+        },
+        required: ["name", "action"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mark_bill",
+      description:
+        "Answer this month's deduction for a saved EMI, rent, subscription, or bill. paid posts the expense once. not_yet asks again tomorrow. skip skips this month.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Bill name or id from the snapshot." },
+          action: { type: "string", enum: ["paid", "not_yet", "skip"] },
+        },
+        required: ["name", "action"],
+        additionalProperties: false,
+      },
+    },
+  },
 ] as const;
 
 async function resolveByName(
@@ -559,6 +655,24 @@ async function loadOverview(sql: Sql, userId: string) {
     }),
   );
 
+  const [monthlyIn, monthlyOut, owned] = await Promise.all([
+    sql<{ id: string; name: string; kind: string; amount: string; day_of_month: number; is_active: boolean }>`
+      select id, name, kind, amount::text as amount, day_of_month, is_active
+      from income_sources where user_id = ${userId}
+      order by is_active desc, day_of_month asc
+    `,
+    sql<{ id: string; name: string; kind: string; amount: string; day_of_month: number; is_active: boolean }>`
+      select id, name, kind, amount::text as amount, day_of_month, is_active
+      from recurring_bills where user_id = ${userId}
+      order by is_active desc, day_of_month asc
+    `,
+    sql<{ id: string; name: string; kind: string; purchase_amount: string; useful_years: number; is_active: boolean }>`
+      select id, name, kind, purchase_amount::text as purchase_amount, useful_years, is_active
+      from owned_assets where user_id = ${userId}
+      order by is_active desc, created_at asc
+    `,
+  ]);
+
   return {
     today,
     month: { from: start, to: end, income: stats[0]?.income ?? "0.00", expense: stats[0]?.expense ?? "0.00" },
@@ -576,7 +690,30 @@ async function loadOverview(sql: Sql, userId: string) {
       id: t.id, type: t.type, amount: t.amount, date: t.transactionDate,
       description: t.description, account: t.accountName, category: t.categoryName, project: t.projectName,
     })),
+    monthlyIn,
+    monthlyOut,
+    owned,
   };
+}
+
+function monthDay(raw: unknown) {
+  const day = Math.floor(Number(raw));
+  if (!Number.isFinite(day) || day < 1 || day > 31) throw new Error("Day of month should be between 1 and 31");
+  return day;
+}
+
+async function pickAccount(sql: Sql, userId: string, name: string) {
+  if (name) {
+    const acc = await resolveByName(sql, "accounts", userId, name);
+    if (!acc || !(await ownedAccount(sql, userId, acc.id))) throw new Error("Choose an account");
+    return acc;
+  }
+  const rows = await sql<{ id: string; name: string }>`
+    select id, name from accounts where user_id = ${userId} and is_active = true order by created_at asc
+  `;
+  if (rows.length === 1) return rows[0]!;
+  if (!rows.length) throw new Error("Add an account first");
+  throw new Error(`Which account? ${rows.map((row) => row.name).join(", ")}`);
 }
 
 async function runTool(
@@ -1086,6 +1223,237 @@ async function runTool(
     };
   }
 
+  if (name === "set_monthly_income") {
+    const label = str("name");
+    if (!label || label.length > 40) throw new Error("Name should be 1–40 characters");
+    const kind = str("kind");
+    if (kind !== "salary" && kind !== "asset" && kind !== "other") throw new Error("Kind must be salary, asset, or other");
+    const amount = parseMoney(str("amount"));
+    if (amount.startsWith("-") || amount === "0.00") throw new Error("Amount must be greater than zero");
+    const day = monthDay(rawArgs.day);
+    const acc = await pickAccount(sql, userId, str("account"));
+    const id = crypto.randomUUID();
+    await sql`
+      insert into income_sources (id, user_id, name, kind, amount, day_of_month, account_id)
+      values (${id}, ${userId}, ${label}, ${kind}, ${amount}::numeric, ${day}, ${acc.id})
+    `;
+    return {
+      result: { id, name: label, kind, amount, day, account: acc.name },
+      summary: `${label} ₹${amount} lands on day ${day} in ${acc.name}`,
+      mutated: true,
+    };
+  }
+
+  if (name === "set_monthly_bill") {
+    const label = str("name");
+    if (!label || label.length > 40) throw new Error("Name should be 1–40 characters");
+    const kind = str("kind");
+    if (!["emi", "rent", "subscription", "bill", "other"].includes(kind)) {
+      throw new Error("Kind must be emi, rent, subscription, bill, or other");
+    }
+    const amount = parseMoney(str("amount"));
+    if (amount.startsWith("-") || amount === "0.00") throw new Error("Amount must be greater than zero");
+    const day = monthDay(rawArgs.day);
+    const acc = await pickAccount(sql, userId, str("account"));
+    const id = crypto.randomUUID();
+    await sql`
+      insert into recurring_bills (id, user_id, name, kind, amount, day_of_month, account_id)
+      values (${id}, ${userId}, ${label}, ${kind}, ${amount}::numeric, ${day}, ${acc.id})
+    `;
+    return {
+      result: { id, name: label, kind, amount, day, account: acc.name },
+      summary: `${label} ₹${amount} cuts on day ${day} from ${acc.name}`,
+      mutated: true,
+    };
+  }
+
+  if (name === "set_owned_asset") {
+    const label = str("name");
+    if (!label || label.length > 40) throw new Error("Name should be 1–40 characters");
+    const kind = str("kind");
+    if (kind !== "vehicle" && kind !== "property" && kind !== "gadget" && kind !== "other") {
+      throw new Error("Kind must be vehicle, property, gadget, or other");
+    }
+    const purchase = parseMoney(str("purchase_amount"));
+    if (purchase.startsWith("-") || purchase === "0.00") throw new Error("Purchase amount must be greater than zero");
+    const salvage = parseMoney(str("salvage_amount") || "0");
+    if (salvage.startsWith("-")) throw new Error("Value at the end can't be negative");
+    if (toCents(salvage) > toCents(purchase)) throw new Error("Value at the end can't be more than what you paid");
+    const bought = str("purchase_date") || todayIST();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(bought)) throw new Error("Purchase date should be YYYY-MM-DD");
+    const yearsRaw = Math.floor(Number(rawArgs.useful_years) || defaultUsefulYears(kind));
+    if (yearsRaw < 1 || yearsRaw > 40) throw new Error("Useful life should be 1–40 years");
+    const id = crypto.randomUUID();
+    await sql`
+      insert into owned_assets (
+        id, user_id, name, kind, purchase_amount, salvage_amount, purchase_date, useful_years
+      ) values (
+        ${id}, ${userId}, ${label}, ${kind}, ${purchase}::numeric, ${salvage}::numeric,
+        ${bought}::date, ${yearsRaw}
+      )
+    `;
+    return {
+      result: { id, name: label, kind, purchase, salvage, purchaseDate: bought, usefulYears: yearsRaw },
+      summary: `${label} bought for ₹${purchase}, written down over ${yearsRaw} years. Cash is unchanged.`,
+      mutated: true,
+    };
+  }
+
+  if (name === "mark_income" || name === "mark_bill") {
+    const key = str("name");
+    if (!key) throw new Error("Which one?");
+    const action = str("action");
+    const today = todayIST();
+    const period = today.slice(0, 7);
+    if (name === "mark_income") {
+      if (action !== "credited" && action !== "not_yet" && action !== "skip") {
+        throw new Error("Action must be credited, not_yet, or skip");
+      }
+      const rows = await sql.query<{
+        id: string;
+        name: string;
+        kind: "salary" | "asset" | "other";
+        amount: string;
+        account_id: string;
+        is_active: boolean;
+      }>(
+        `select id, name, kind, amount::text as amount, account_id, is_active
+         from income_sources
+         where user_id = $1 and (id = $2 or lower(name) = lower($2) or name ilike $3)
+         limit 5`,
+        [userId, key, `%${key}%`],
+      );
+      const exact = rows.filter((row) => row.id === key || row.name.toLowerCase() === key.toLowerCase());
+      const source = (exact.length === 1 ? exact[0] : rows.length === 1 ? rows[0] : undefined);
+      if (!source) {
+        throw new Error(rows.length > 1 ? `Which income? ${rows.map((row) => row.name).join(", ")}` : `No income named "${key}".`);
+      }
+      if (!source.is_active) throw new Error("That income is paused");
+      if (action !== "credited") {
+        const status = action === "skip" ? "skipped" : "snoozed";
+        const until = action === "not_yet" ? addDaysISO(today, 1) : null;
+        await sql`
+          insert into income_checkins (id, user_id, source_id, period, status, snooze_until)
+          values (${crypto.randomUUID()}, ${userId}, ${source.id}, ${period}, ${status}, ${until}::date)
+          on conflict (source_id, period) do update set
+            status = excluded.status, snooze_until = excluded.snooze_until
+          where income_checkins.status <> 'credited'
+        `;
+        return { result: { ok: true }, summary: action === "skip" ? `Skipped ${source.name} this month` : `Will ask about ${source.name} tomorrow`, mutated: true };
+      }
+      const existing = await sql<{ status: string }>`
+        select status from income_checkins where source_id = ${source.id} and period = ${period}
+      `;
+      if (existing[0]?.status === "credited") {
+        return { result: { already: true }, summary: `${source.name} is already in this month`, mutated: false };
+      }
+      const preferred = source.kind === "salary" ? "salary" : "other income";
+      const cats = await sql<{ id: string }>`
+        select id from categories
+        where user_id = ${userId} and type = 'income' and is_active = true
+        order by case when lower(name) = ${preferred} then 0 else 1 end, name
+        limit 1
+      `;
+      const txnId = crypto.randomUUID();
+      const amount = parseMoney(source.amount);
+      await sql`
+        insert into transactions (
+          id, user_id, account_id, category_id, type, amount, transaction_date, description, is_committed
+        ) values (
+          ${txnId}, ${userId}, ${source.account_id}, ${cats[0]?.id ?? null}, 'income',
+          ${amount}::numeric, ${today}::date, ${source.name}, true
+        )
+      `;
+      const claimed = await sql<{ id: string }>`
+        insert into income_checkins (id, user_id, source_id, period, status, transaction_id)
+        values (${crypto.randomUUID()}, ${userId}, ${source.id}, ${period}, 'credited', ${txnId})
+        on conflict (source_id, period) do update set
+          status = 'credited',
+          transaction_id = coalesce(income_checkins.transaction_id, excluded.transaction_id)
+        where income_checkins.status <> 'credited'
+        returning id
+      `;
+      if (!claimed[0]) {
+        await sql`delete from transactions where id = ${txnId} and user_id = ${userId}`;
+        return { result: { already: true }, summary: `${source.name} is already in this month`, mutated: false };
+      }
+      return { result: { amount, date: today }, summary: `${source.name} ₹${amount} credited`, mutated: true };
+    }
+
+    if (action !== "paid" && action !== "not_yet" && action !== "skip") {
+      throw new Error("Action must be paid, not_yet, or skip");
+    }
+    const rows = await sql.query<{
+      id: string;
+      name: string;
+      kind: string;
+      amount: string;
+      account_id: string;
+      is_active: boolean;
+    }>(
+      `select id, name, kind, amount::text as amount, account_id, is_active
+       from recurring_bills
+       where user_id = $1 and (id = $2 or lower(name) = lower($2) or name ilike $3)
+       limit 5`,
+      [userId, key, `%${key}%`],
+    );
+    const exact = rows.filter((row) => row.id === key || row.name.toLowerCase() === key.toLowerCase());
+    const bill = exact.length === 1 ? exact[0] : rows.length === 1 ? rows[0] : undefined;
+    if (!bill) {
+      throw new Error(rows.length > 1 ? `Which bill? ${rows.map((row) => row.name).join(", ")}` : `No bill named "${key}".`);
+    }
+    if (!bill.is_active) throw new Error("That bill is paused");
+    if (action !== "paid") {
+      const status = action === "skip" ? "skipped" : "snoozed";
+      const until = action === "not_yet" ? addDaysISO(today, 1) : null;
+      await sql`
+        insert into bill_checkins (id, user_id, bill_id, period, status, snooze_until)
+        values (${crypto.randomUUID()}, ${userId}, ${bill.id}, ${period}, ${status}, ${until}::date)
+        on conflict (bill_id, period) do update set
+          status = excluded.status, snooze_until = excluded.snooze_until
+        where bill_checkins.status <> 'paid'
+      `;
+      return { result: { ok: true }, summary: action === "skip" ? `Skipped ${bill.name} this month` : `Will ask about ${bill.name} tomorrow`, mutated: true };
+    }
+    const existing = await sql<{ status: string }>`
+      select status from bill_checkins where bill_id = ${bill.id} and period = ${period}
+    `;
+    if (existing[0]?.status === "paid") {
+      return { result: { already: true }, summary: `${bill.name} is already marked deducted`, mutated: false };
+    }
+    const preferred = bill.kind === "subscription" ? "subscriptions" : bill.kind === "other" ? "other" : "bills";
+    const cats = await sql<{ id: string }>`
+      select id from categories
+      where user_id = ${userId} and type = 'expense' and is_active = true
+      order by case when lower(name) = ${preferred} then 0 else 1 end, name
+      limit 1
+    `;
+    const txnId = crypto.randomUUID();
+    const amount = parseMoney(bill.amount);
+    await sql`
+      insert into transactions (
+        id, user_id, account_id, category_id, type, amount, transaction_date, description, is_committed
+      ) values (
+        ${txnId}, ${userId}, ${bill.account_id}, ${cats[0]?.id ?? null}, 'expense',
+        ${amount}::numeric, ${today}::date, ${bill.name}, true
+      )
+    `;
+    const claimed = await sql<{ id: string }>`
+      insert into bill_checkins (id, user_id, bill_id, period, status, transaction_id)
+      values (${crypto.randomUUID()}, ${userId}, ${bill.id}, ${period}, 'paid', ${txnId})
+      on conflict (bill_id, period) do update set
+        status = 'paid',
+        transaction_id = coalesce(bill_checkins.transaction_id, excluded.transaction_id)
+      where bill_checkins.status <> 'paid'
+      returning id
+    `;
+    if (!claimed[0]) {
+      await sql`delete from transactions where id = ${txnId} and user_id = ${userId}`;
+      return { result: { already: true }, summary: `${bill.name} is already marked deducted`, mutated: false };
+    }
+    return { result: { amount, date: today }, summary: `${bill.name} ₹${amount} deducted`, mutated: true };
+  }
+
   throw new Error(`Unknown tool ${name}`);
 }
 
@@ -1103,9 +1471,16 @@ Examples:
   "aaj 250 coffee UPI pe" → description "Coffee".
   "5k HDFC se UPI" → transfer, no Hinglish description.
 
-You can actually change their books with tools. When they ask to add/log/record spend, income, transfers, accounts, trips, budgets, splits, invites, or settlements — call the tool. Don't describe how to click the UI.
+You can actually change their books with tools. When they ask to add/log/record spend, income, transfers, accounts, trips, budgets, splits, invites, settlements, salary, EMI, subscriptions, bills, or things they own — call the tool. Don't describe how to click the UI.
 On a personal project, remaining = budget − expenses + income tagged to that project. Never raise the budget because someone paid them back.
 On a collaborative project, remaining and spent in the snapshot are YOUR spend (personal expenses plus your share), not the whole group. you > 0 means you are owed. you < 0 means you owe.
+
+MONTHLY
+- Repeating money in (salary, rent received, FD): set_monthly_income. It does not add cash. When they say it arrived, mark_income action credited — that posts the income once.
+- Repeating money out (EMI, rent they pay, subscription, electricity): set_monthly_bill. day is the day it is deducted. When they say it was cut, mark_bill action paid — that posts the expense once. not_yet asks tomorrow. skip is this month only.
+- Something they own, and what it is worth later: set_owned_asset. Depreciation is paper only. Never add_transaction for the drop in value.
+- One-off coffee, a trip fare, a single transfer: add_transaction, not the monthly tools.
+- Names you store are short English. Translate "youtube subscription" to "YouTube". Keep Kotak, HDFC, UPI.
 
 SPLITTING
 - Your own project expense, with no one else sharing it: add_transaction. It reduces your remaining and creates no debt.

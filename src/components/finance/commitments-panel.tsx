@@ -120,13 +120,68 @@ function BillsBlock({
   }
 
   return (
-    <section className="space-y-3">
+    <section id="bills" className="space-y-3 scroll-mt-24">
       <div>
         <h2 className="text-sm font-medium">Money out</h2>
         <p className="mt-1 text-sm text-muted-foreground">
           EMI, rent, subscriptions, bills. Cuts on is the day the money leaves. From that day, home and your phone ask if it was deducted. Until you say yes, the month holds that amount back.
         </p>
       </div>
+      {bills.length > 0 && (
+        <ul className="space-y-2">
+          {bills.map((bill) => (
+            <li key={bill.id} className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
+              <div className="flex items-baseline justify-between gap-3">
+                <p className={cn("font-medium", !bill.isActive && "text-muted-foreground")}>{bill.name}</p>
+                <p className="tabular text-sm">{formatMoney(bill.amount, currency)}</p>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {BILL_LABEL[bill.kind]} · cuts the {ordinal(bill.dayOfMonth)} · {bill.accountName}
+                {!bill.isActive ? " · Paused" : bill.checkin === "paid" ? " · Paid" : bill.checkin === "skipped" ? " · Skipped" : ""}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-3 text-xs">
+                <button
+                  type="button"
+                  className="text-muted-foreground underline-offset-4 hover:underline"
+                  onClick={() => {
+                    setEditing(bill.id);
+                    setName(bill.name);
+                    setKind(bill.kind);
+                    setAmount(bill.amount.replace(/\.00$/, ""));
+                    setDay(String(bill.dayOfMonth));
+                    setAccountId(bill.accountId);
+                  }}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  className="text-muted-foreground underline-offset-4 hover:underline"
+                  onClick={() =>
+                    void setBillActive({ data: { id: bill.id, isActive: !bill.isActive } })
+                      .then(onChanged)
+                      .catch((err) => toast.error(err instanceof Error ? err.message : "Couldn't update"))
+                  }
+                >
+                  {bill.isActive ? "Pause" : "Resume"}
+                </button>
+                <button
+                  type="button"
+                  className="text-muted-foreground underline-offset-4 hover:underline"
+                  onClick={() => {
+                    if (!window.confirm(`Remove ${bill.name}? Past payments stay.`)) return;
+                    void deleteBill({ data: { id: bill.id } })
+                      .then(onChanged)
+                      .catch((err) => toast.error(err instanceof Error ? err.message : "Couldn't remove"));
+                  }}
+                >
+                  Remove
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
       {accounts.length > 0 && (
         <form onSubmit={onSubmit} className="space-y-4 rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
           <div className="grid grid-cols-2 gap-2">
@@ -202,61 +257,6 @@ function BillsBlock({
           </div>
         </form>
       )}
-      {bills.length > 0 && (
-        <ul className="space-y-2">
-          {bills.map((bill) => (
-            <li key={bill.id} className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
-              <div className="flex items-baseline justify-between gap-3">
-                <p className={cn("font-medium", !bill.isActive && "text-muted-foreground")}>{bill.name}</p>
-                <p className="tabular text-sm">{formatMoney(bill.amount, currency)}</p>
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {BILL_LABEL[bill.kind]} · cuts the {ordinal(bill.dayOfMonth)} · {bill.accountName}
-                {!bill.isActive ? " · Paused" : bill.checkin === "paid" ? " · Paid" : bill.checkin === "skipped" ? " · Skipped" : ""}
-              </p>
-              <div className="mt-3 flex flex-wrap gap-3 text-xs">
-                <button
-                  type="button"
-                  className="text-muted-foreground underline-offset-4 hover:underline"
-                  onClick={() => {
-                    setEditing(bill.id);
-                    setName(bill.name);
-                    setKind(bill.kind);
-                    setAmount(bill.amount.replace(/\.00$/, ""));
-                    setDay(String(bill.dayOfMonth));
-                    setAccountId(bill.accountId);
-                  }}
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  className="text-muted-foreground underline-offset-4 hover:underline"
-                  onClick={() =>
-                    void setBillActive({ data: { id: bill.id, isActive: !bill.isActive } })
-                      .then(onChanged)
-                      .catch((err) => toast.error(err instanceof Error ? err.message : "Couldn't update"))
-                  }
-                >
-                  {bill.isActive ? "Pause" : "Resume"}
-                </button>
-                <button
-                  type="button"
-                  className="text-muted-foreground underline-offset-4 hover:underline"
-                  onClick={() => {
-                    if (!window.confirm(`Remove ${bill.name}? Past payments stay.`)) return;
-                    void deleteBill({ data: { id: bill.id } })
-                      .then(onChanged)
-                      .catch((err) => toast.error(err instanceof Error ? err.message : "Couldn't remove"));
-                  }}
-                >
-                  Remove
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
     </section>
   );
 }
@@ -312,7 +312,7 @@ function AssetsBlock({
   }
 
   return (
-    <section className="space-y-3">
+    <section id="assets" className="space-y-3 scroll-mt-24">
       <div>
         <h2 className="text-sm font-medium">Things you own</h2>
         <p className="mt-1 text-sm text-muted-foreground">
@@ -330,6 +330,66 @@ function AssetsBlock({
             <p className="mt-1 font-display text-lg tracking-tight tabular">{formatMoney(paperDrop, currency)}</p>
           </div>
         </div>
+      )}
+      {assets.length > 0 && (
+        <ul className="space-y-2">
+          {assets.map((asset) => (
+            <li key={asset.id} className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
+              <div className="flex items-baseline justify-between gap-3">
+                <p className={cn("font-medium", !asset.isActive && "text-muted-foreground")}>{asset.name}</p>
+                <p className="tabular text-sm">{formatMoney(asset.bookValue, currency)}</p>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {ASSET_LABEL[asset.kind]}
+                {asset.isActive
+                  ? asset.finished
+                    ? " · Fully written down"
+                    : ` · drops ${formatMoney(asset.monthly, currency)} a month · ${asset.monthsUsed} of ${asset.lifeMonths} months`
+                  : " · Sold or retired"}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-3 text-xs">
+                <button
+                  type="button"
+                  className="text-muted-foreground underline-offset-4 hover:underline"
+                  onClick={() => {
+                    setEditing(asset.id);
+                    setName(asset.name);
+                    setKind(asset.kind);
+                    setPurchase(asset.purchaseAmount.replace(/\.00$/, ""));
+                    setSalvage(asset.salvageAmount === "0.00" ? "" : asset.salvageAmount.replace(/\.00$/, ""));
+                    setBought(asset.purchaseDate);
+                    setYears(String(asset.usefulYears));
+                  }}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  className="text-muted-foreground underline-offset-4 hover:underline"
+                  onClick={() =>
+                    void setAssetActive({ data: { id: asset.id, isActive: !asset.isActive } })
+                      .then(onChanged)
+                      .catch((err) => toast.error(err instanceof Error ? err.message : "Couldn't update"))
+                  }
+                >
+                  {asset.isActive ? "Mark sold" : "Own again"}
+                </button>
+                <button
+                  type="button"
+                  className="text-muted-foreground underline-offset-4 hover:underline"
+                  onClick={() => {
+                    if (!window.confirm(`Remove ${asset.name}?`)) return;
+                    void deleteAsset({ data: { id: asset.id } })
+                      .then(onChanged)
+                      .catch((err) => toast.error(err instanceof Error ? err.message : "Couldn't remove"));
+                  }}
+                >
+                  Remove
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
       )}
       <form onSubmit={onSubmit} className="space-y-4 rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
         <div className="grid grid-cols-2 gap-2">
@@ -402,66 +462,6 @@ function AssetsBlock({
           )}
         </div>
       </form>
-      {assets.length > 0 && (
-        <ul className="space-y-2">
-          {assets.map((asset) => (
-            <li key={asset.id} className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
-              <div className="flex items-baseline justify-between gap-3">
-                <p className={cn("font-medium", !asset.isActive && "text-muted-foreground")}>{asset.name}</p>
-                <p className="tabular text-sm">{formatMoney(asset.bookValue, currency)}</p>
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {ASSET_LABEL[asset.kind]}
-                {asset.isActive
-                  ? asset.finished
-                    ? " · Fully written down"
-                    : ` · drops ${formatMoney(asset.monthly, currency)} a month · ${asset.monthsUsed} of ${asset.lifeMonths} months`
-                  : " · Sold or retired"}
-              </p>
-              <div className="mt-3 flex flex-wrap gap-3 text-xs">
-                <button
-                  type="button"
-                  className="text-muted-foreground underline-offset-4 hover:underline"
-                  onClick={() => {
-                    setEditing(asset.id);
-                    setName(asset.name);
-                    setKind(asset.kind);
-                    setPurchase(asset.purchaseAmount.replace(/\.00$/, ""));
-                    setSalvage(asset.salvageAmount === "0.00" ? "" : asset.salvageAmount.replace(/\.00$/, ""));
-                    setBought(asset.purchaseDate);
-                    setYears(String(asset.usefulYears));
-                  }}
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  className="text-muted-foreground underline-offset-4 hover:underline"
-                  onClick={() =>
-                    void setAssetActive({ data: { id: asset.id, isActive: !asset.isActive } })
-                      .then(onChanged)
-                      .catch((err) => toast.error(err instanceof Error ? err.message : "Couldn't update"))
-                  }
-                >
-                  {asset.isActive ? "Mark sold" : "Own again"}
-                </button>
-                <button
-                  type="button"
-                  className="text-muted-foreground underline-offset-4 hover:underline"
-                  onClick={() => {
-                    if (!window.confirm(`Remove ${asset.name}?`)) return;
-                    void deleteAsset({ data: { id: asset.id } })
-                      .then(onChanged)
-                      .catch((err) => toast.error(err instanceof Error ? err.message : "Couldn't remove"));
-                  }}
-                >
-                  Remove
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
     </section>
   );
 }
