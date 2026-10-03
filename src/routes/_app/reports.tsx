@@ -5,7 +5,9 @@ import { getReports } from "@/lib/server/reports";
 import { useAppData } from "@/components/data-provider";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { formatMoney } from "@/lib/money";
+import { Button } from "@/components/ui/button";
+import { formatMoney, isZero } from "@/lib/money";
+import { formatLongDate } from "@/lib/utils";
 import { CategoryIcon } from "@/components/finance/icons";
 import { EmptyState } from "@/components/finance/empty-state";
 import { PieChart as PieIcon } from "lucide-react";
@@ -22,6 +24,15 @@ function ReportsPage() {
     queryFn: () => getReports({ data: { from, to } }),
   });
   const r = q.data;
+  const quiet = !!r && isZero(r.income) && isZero(r.expense) && r.daily.length === 0;
+  const hasLedger = !!r && (r.bounds.count > 0 || r.accounts.length > 0 || r.projects.length > 0);
+  const outside =
+    !!r &&
+    quiet &&
+    r.bounds.count > 0 &&
+    r.bounds.from &&
+    r.bounds.to &&
+    (r.bounds.from < from || r.bounds.to > to);
 
   return (
     <div className="space-y-6 pt-4">
@@ -41,19 +52,47 @@ function ReportsPage() {
         </div>
       </div>
 
-      {!r || (r.income === "0.00" && r.expense === "0.00" && r.daily.length === 0) ? (
+      {q.isPending && <p className="text-sm text-muted-foreground">Loading your ledger…</p>}
+
+      {q.isError && (
+        <p className="text-sm text-expense">{q.error instanceof Error ? q.error.message : "Couldn't load reports."}</p>
+      )}
+
+      {r && !hasLedger && quiet && (
         <EmptyState
           icon={PieIcon}
           title="Nothing to report yet"
           body="Add a few transactions and this view fills itself."
         />
-      ) : (
+      )}
+
+      {r && hasLedger && (
         <>
           <div className="grid grid-cols-3 gap-2">
             <Metric label="Income" value={formatMoney(r.income, currency)} tone="text-income" />
             <Metric label="Expenses" value={formatMoney(r.expense, currency)} tone="text-expense" />
             <Metric label="Savings" value={formatMoney(r.savings, currency)} />
           </div>
+
+          {quiet && (
+            <div className="rounded-xl bg-card p-4 text-sm shadow-[var(--elev-shadow)]">
+              <p>Nothing posted between these dates. Balances and projects below are still yours.</p>
+              {outside && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="mt-3"
+                  onClick={() => {
+                    setFrom(r.bounds.from!);
+                    setTo(r.bounds.to!);
+                  }}
+                >
+                  Show {formatLongDate(r.bounds.from!)} – {formatLongDate(r.bounds.to!)}
+                </Button>
+              )}
+            </div>
+          )}
 
           {r.daily.length > 0 && (
             <section className="space-y-3">
@@ -100,7 +139,7 @@ function ReportsPage() {
 
           {r.byProject.length > 0 && (
             <section className="space-y-3">
-              <h2 className="text-sm font-medium">By project</h2>
+              <h2 className="text-sm font-medium">Spent in this range</h2>
               <div className="rounded-xl bg-card p-3 shadow-[var(--elev-shadow)]">
                 {r.byProject.map((p) => (
                   <div key={p.name} className="flex items-center justify-between py-2 text-sm">
@@ -112,9 +151,40 @@ function ReportsPage() {
             </section>
           )}
 
+          {r.projects.length > 0 && (
+            <section className="space-y-3">
+              <h2 className="text-sm font-medium">Projects</h2>
+              <div className="rounded-xl bg-card p-3 shadow-[var(--elev-shadow)]">
+                {r.projects.map((p) => (
+                  <div key={p.id} className="flex items-center justify-between gap-3 py-2 text-sm">
+                    <span className="truncate">{p.name}</span>
+                    <span className="shrink-0 tabular">
+                      {formatMoney(p.spent, currency)}
+                      {!isZero(p.budget) ? ` / ${formatMoney(p.budget, currency)}` : ""}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {r.accounts.length > 0 && (
+            <section className="space-y-3">
+              <h2 className="text-sm font-medium">Balances</h2>
+              <div className="rounded-xl bg-card p-3 shadow-[var(--elev-shadow)]">
+                {r.accounts.map((a) => (
+                  <div key={a.id} className="flex items-center justify-between py-2 text-sm">
+                    <span>{a.name}</span>
+                    <span className="tabular">{formatMoney(a.balance, currency)}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
           {r.byAccount.length > 0 && (
             <section className="space-y-3">
-              <h2 className="text-sm font-medium">By account</h2>
+              <h2 className="text-sm font-medium">Spent from</h2>
               <div className="rounded-xl bg-card p-3 shadow-[var(--elev-shadow)]">
                 {r.byAccount.map((a) => (
                   <div key={a.id} className="flex items-center justify-between py-2 text-sm">
