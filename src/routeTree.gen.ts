@@ -16,6 +16,7 @@ import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppAccountsRouteImport } from './routes/_app/accounts'
 import { Route as AppAssistantRouteImport } from './routes/_app/assistant'
 import { Route as AppBudgetsRouteImport } from './routes/_app/budgets'
+import { Route as AppIncomeRouteImport } from './routes/_app/income'
 import { Route as AppMoreRouteImport } from './routes/_app/more'
 import { Route as AppProjectsRouteImport } from './routes/_app/projects'
 import { Route as AppReportsRouteImport } from './routes/_app/reports'
@@ -61,6 +62,11 @@ const AppAssistantRoute = AppAssistantRouteImport.update({
 const AppBudgetsRoute = AppBudgetsRouteImport.update({
   id: '/budgets',
   path: '/budgets',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppIncomeRoute = AppIncomeRouteImport.update({
+  id: '/income',
+  path: '/income',
   getParentRoute: () => AppRoute,
 } as any)
 const AppMoreRoute = AppMoreRouteImport.update({
@@ -131,6 +137,7 @@ export interface FileRoutesByFullPath {
   '/accounts': typeof AppAccountsRouteWithChildren
   '/assistant': typeof AppAssistantRoute
   '/budgets': typeof AppBudgetsRoute
+  '/income': typeof AppIncomeRoute
   '/more': typeof AppMoreRoute
   '/projects': typeof AppProjectsRouteWithChildren
   '/reports': typeof AppReportsRoute
@@ -149,6 +156,7 @@ export interface FileRoutesByTo {
   '/onboarding': typeof OnboardingRoute
   '/assistant': typeof AppAssistantRoute
   '/budgets': typeof AppBudgetsRoute
+  '/income': typeof AppIncomeRoute
   '/more': typeof AppMoreRoute
   '/reports': typeof AppReportsRoute
   '/settings': typeof AppSettingsRoute
@@ -170,6 +178,7 @@ export interface FileRoutesById {
   '/_app/accounts': typeof AppAccountsRouteWithChildren
   '/_app/assistant': typeof AppAssistantRoute
   '/_app/budgets': typeof AppBudgetsRoute
+  '/_app/income': typeof AppIncomeRoute
   '/_app/more': typeof AppMoreRoute
   '/_app/projects': typeof AppProjectsRouteWithChildren
   '/_app/reports': typeof AppReportsRoute
@@ -193,6 +202,7 @@ export interface FileRouteTypes {
     | '/accounts'
     | '/assistant'
     | '/budgets'
+    | '/income'
     | '/more'
     | '/projects'
     | '/reports'
@@ -211,6 +221,7 @@ export interface FileRouteTypes {
     | '/onboarding'
     | '/assistant'
     | '/budgets'
+    | '/income'
     | '/more'
     | '/reports'
     | '/settings'
@@ -231,6 +242,7 @@ export interface FileRouteTypes {
     | '/_app/accounts'
     | '/_app/assistant'
     | '/_app/budgets'
+    | '/_app/income'
     | '/_app/more'
     | '/_app/projects'
     | '/_app/reports'
@@ -304,6 +316,13 @@ declare module '@tanstack/react-router' {
       path: '/budgets'
       fullPath: '/budgets'
       preLoaderRoute: typeof AppBudgetsRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/income': {
+      id: '/_app/income'
+      path: '/income'
+      fullPath: '/income'
+      preLoaderRoute: typeof AppIncomeRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/more': {
@@ -425,6 +444,7 @@ interface AppRouteChildren {
   AppAccountsRoute: typeof AppAccountsRouteWithChildren
   AppAssistantRoute: typeof AppAssistantRoute
   AppBudgetsRoute: typeof AppBudgetsRoute
+  AppIncomeRoute: typeof AppIncomeRoute
   AppMoreRoute: typeof AppMoreRoute
   AppProjectsRoute: typeof AppProjectsRouteWithChildren
   AppReportsRoute: typeof AppReportsRoute
@@ -437,6 +457,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppAccountsRoute: AppAccountsRouteWithChildren,
   AppAssistantRoute: AppAssistantRoute,
   AppBudgetsRoute: AppBudgetsRoute,
+  AppIncomeRoute: AppIncomeRoute,
   AppMoreRoute: AppMoreRoute,
   AppProjectsRoute: AppProjectsRouteWithChildren,
   AppReportsRoute: AppReportsRoute,

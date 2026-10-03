@@ -1,4 +1,3 @@
-import { createHash, randomBytes } from "node:crypto";
 import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { ensureUser, ownedAccount, ownedCategory } from "@/lib/server/ensure";
@@ -15,8 +14,14 @@ import {
   type SplitMethod,
 } from "@/lib/split";
 
-function hashToken(token: string) {
+async function hashToken(token: string) {
+  const { createHash } = await import("node:crypto");
   return createHash("sha256").update(token).digest("hex");
+}
+
+async function newToken() {
+  const { randomBytes } = await import("node:crypto");
+  return randomBytes(24).toString("base64url");
 }
 
 type Role = "owner" | "member";
@@ -101,12 +106,12 @@ export async function issueInvite(sql: Sql, userId: string, projectId: string) {
       values (${crypto.randomUUID()}, ${projectId}, ${gate.project.user_id}, 'owner', 'active')
     `;
   }
-  const token = randomBytes(24).toString("base64url");
+  const token = await newToken();
   const id = crypto.randomUUID();
   await sql`
     insert into project_invites (id, project_id, token_hash, invited_by, expires_at)
     values (
-      ${id}, ${projectId}, ${hashToken(token)}, ${userId},
+      ${id}, ${projectId}, ${await hashToken(token)}, ${userId},
       now() + interval '14 days'
     )
   `;
@@ -335,7 +340,7 @@ export const previewInvite = createServerFn({ method: "POST" })
         from project_invites i
         join projects pr on pr.id = i.project_id
         left join profiles p on p.id = i.invited_by
-        where i.token_hash = ${hashToken(data.token)}
+        where i.token_hash = ${await hashToken(data.token)}
       `;
       const invite = rows[0];
       if (!invite) throw new Error("This invite link is not valid");
@@ -376,7 +381,7 @@ export const acceptInvite = createServerFn({ method: "POST" })
                pr.user_id as owner_id
         from project_invites i
         join projects pr on pr.id = i.project_id
-        where i.token_hash = ${hashToken(data.token)}
+        where i.token_hash = ${await hashToken(data.token)}
       `;
       const invite = rows[0];
       if (!invite) throw new Error("This invite link is not valid");

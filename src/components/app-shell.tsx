@@ -1,6 +1,7 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import {
   ArrowLeftRight,
+  Banknote,
   FolderKanban,
   LayoutGrid,
   MoreHorizontal,
@@ -17,6 +18,7 @@ import { useVisualKeyboard } from "@/hooks/use-visual-keyboard";
 
 const DESKTOP = [
   { to: "/", label: "Home", icon: LayoutGrid },
+  { to: "/income", label: "Monthly", icon: Banknote },
   { to: "/assistant", label: "Ask", icon: Sparkles },
   { to: "/transactions", label: "Transactions", icon: ArrowLeftRight },
   { to: "/projects", label: "Projects", icon: FolderKanban },

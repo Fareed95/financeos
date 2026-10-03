@@ -1,4 +1,3 @@
-import { createHash, randomBytes } from "node:crypto";
 import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, type Sql } from "@/lib/db";
@@ -30,8 +29,14 @@ type StoredPart = {
   status: "pending" | "accepted";
 };
 
-function hashToken(token: string) {
+async function hashToken(token: string) {
+  const { createHash } = await import("node:crypto");
   return createHash("sha256").update(token).digest("hex");
+}
+
+async function newToken() {
+  const { randomBytes } = await import("node:crypto");
+  return randomBytes(24).toString("base64url");
 }
 
 export function safeOrigin(input: string | undefined | null): string {
@@ -184,7 +189,7 @@ export async function saveSplitLinks(
   const base = safeOrigin(origin);
   const links: ShareLink[] = [];
   for (const part of resolved) {
-    const token = randomBytes(24).toString("base64url");
+    const token = await newToken();
     const accepted = part.status === "accepted" && Boolean(part.userId);
     await sql`
       insert into split_links (
@@ -192,7 +197,7 @@ export async function saveSplitLinks(
         allocated_amount, token_hash, invited_by, expires_at, status, accepted_by, accepted_at
       ) values (
         ${crypto.randomUUID()}, ${transactionId}, ${part.userId}, ${part.name}, ${part.email},
-        ${method}, ${part.value}::numeric, ${part.allocated}::numeric, ${hashToken(token)},
+        ${method}, ${part.value}::numeric, ${part.allocated}::numeric, ${await hashToken(token)},
         ${ownerId}, now() + interval '30 days', ${accepted ? "accepted" : "pending"},
         ${accepted ? part.userId : null},
         ${accepted ? new Date().toISOString() : null}
@@ -298,7 +303,7 @@ export const previewSplit = createServerFn({ method: "POST" })
         join transactions t on t.id = l.transaction_id
         left join profiles p on p.id = l.invited_by
         left join "user" u on u.id = l.invited_by
-        where l.token_hash = ${hashToken(token)}
+        where l.token_hash = ${await hashToken(token)}
       `;
       const row = rows[0];
       if (!row) throw new Error("This split link is not valid");
@@ -333,7 +338,7 @@ export const acceptSplit = createServerFn({ method: "POST" })
       }>`
         select id, status, user_id, invited_by, expires_at::text as expires_at
         from split_links
-        where token_hash = ${hashToken(token)}
+        where token_hash = ${await hashToken(token)}
       `;
       const row = rows[0];
       if (!row) throw new Error("This split link is not valid");

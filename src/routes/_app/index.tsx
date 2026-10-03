@@ -7,6 +7,7 @@ import { TxnRow } from "@/components/finance/txn-row";
 import { TxnEditSheet } from "@/components/finance/txn-edit-sheet";
 import { InstallAppCard } from "@/components/install-app";
 import { useQuickAdd } from "@/components/finance/quick-add";
+import { MoneyInHome } from "@/components/finance/money-in-home";
 import { formatMoney, isNegative, percentUsed } from "@/lib/money";
 import { listMySplits, markSplitSettled } from "@/lib/server/split-links";
 import { monthLabel } from "@/lib/utils";
@@ -44,6 +45,8 @@ function Home() {
             : ""}
         </p>
       </header>
+
+      <MoneyInHome />
 
       <InstallAppCard className="fos-enter fos-enter-delay-1" dismissible />
 

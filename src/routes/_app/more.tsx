@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { ChevronRight, FileSpreadsheet, LogOut, Settings, Sparkles, UserRound, Wallet } from "lucide-react";
+import { Banknote, ChevronRight, FileSpreadsheet, LogOut, Settings, Sparkles, UserRound, Wallet } from "lucide-react";
 import { useAppData } from "@/components/data-provider";
 import { InstallAppCard } from "@/components/install-app";
 import { exportData } from "@/lib/server/io";
@@ -32,6 +32,7 @@ function MorePage() {
 
   const items = [
     { to: "/assistant", label: "Ask the ledger", icon: Sparkles },
+    { to: "/income", label: "Monthly", icon: Banknote },
     { to: "/accounts", label: "Accounts", icon: Wallet },
     { to: "/budgets", label: "Budgets", icon: Wallet },
     { to: "/settings", label: "Settings", icon: Settings },
