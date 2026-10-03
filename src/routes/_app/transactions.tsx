@@ -17,11 +17,11 @@ import type { Transaction, TxnFilters, TxnType } from "@/lib/types";
 export const Route = createFileRoute("/_app/transactions")({ component: TransactionsPage });
 
 function TransactionsPage() {
-  const { data, currency, from, to } = useAppData();
+  const { data, currency } = useAppData();
   const { openAdd } = useQuickAdd();
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
-  const [filters, setFilters] = useState<TxnFilters>({ from, to, sort: "newest" });
+  const [filters, setFilters] = useState<TxnFilters>({ sort: "newest" });
   const [filterOpen, setFilterOpen] = useState(false);
   const [edit, setEdit] = useState<Transaction | null>(null);
 
@@ -48,13 +48,16 @@ function TransactionsPage() {
 
   const items = list.data?.pages.flatMap((p) => p.items) ?? [];
   const total = list.data?.pages[0]?.total ?? 0;
+  const ranged = Boolean(filters.from || filters.to);
 
   return (
     <div className="space-y-5 pt-4">
       <header className="flex items-end justify-between gap-3">
         <div>
           <h1 className="font-display text-3xl tracking-tight">Transactions</h1>
-          <p className="text-sm text-muted-foreground">{total} in this view</p>
+          <p className="text-sm text-muted-foreground">
+            {total} {ranged ? "in this range" : total === 1 ? "transaction" : "transactions"}
+          </p>
         </div>
         <Button variant="outline" size="icon" aria-label="Filters" onClick={() => setFilterOpen(true)}>
           <SlidersHorizontal className="size-4" />
@@ -69,13 +72,23 @@ function TransactionsPage() {
       />
 
       {items.length === 0 && !list.isPending ? (
-        <EmptyState
-          icon={ArrowLeftRight}
-          title="No transactions yet"
-          body="Add your first expense — it takes a few seconds."
-          action="Add your first expense"
-          onAction={() => openAdd()}
-        />
+        ranged ? (
+          <EmptyState
+            icon={ArrowLeftRight}
+            title="Nothing in these dates"
+            body="Home’s balance is the whole account. This list was cut to a date range."
+            action="Show all transactions"
+            onAction={() => setFilters((f) => ({ ...f, from: undefined, to: undefined }))}
+          />
+        ) : (
+          <EmptyState
+            icon={ArrowLeftRight}
+            title="No transactions yet"
+            body="Add your first expense — it takes a few seconds."
+            action="Add your first expense"
+            onAction={() => openAdd()}
+          />
+        )
       ) : (
         <div className="rounded-xl bg-card px-3 py-1 shadow-[var(--elev-shadow)]">
           {items.map((t) => (

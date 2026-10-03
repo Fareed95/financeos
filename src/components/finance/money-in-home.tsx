@@ -1,12 +1,13 @@
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAppData } from "@/components/data-provider";
 import { useQuickAdd } from "@/components/finance/quick-add";
 import { Button } from "@/components/ui/button";
 import { answerPayday, getIncomePlan } from "@/lib/server/income";
 import { answerBill } from "@/lib/server/commitments";
+import { notifyCutReminders } from "@/lib/bill-reminders";
 import { formatMoney, isPositive, isZero } from "@/lib/money";
 import { ordinal, type Advice } from "@/lib/month-plan";
 import { cn } from "@/lib/utils";
@@ -78,6 +79,19 @@ export function MoneyInHome() {
     queryFn: () => getIncomePlan({ data: { today } }),
   });
 
+  useEffect(() => {
+    const prompts = plan.data?.billPrompts ?? [];
+    if (prompts.length === 0) return;
+    void notifyCutReminders(
+      prompts.map((prompt) => ({
+        id: prompt.billId,
+        title: prompt.name,
+        body: `Was ${formatMoney(prompt.amount, currency)} deducted from ${prompt.accountName}?`,
+      })),
+      today,
+    );
+  }, [plan.data, today, currency]);
+
   if (plan.isError) return null;
   if (!plan.data) return null;
   const data = plan.data;
@@ -89,7 +103,7 @@ export function MoneyInHome() {
     setBusy(billId + action);
     try {
       await answerBill({ data: { billId, action, today } });
-      if (action === "paid") toast.success("Marked as paid");
+      if (action === "paid") toast.success("Marked as deducted");
       else if (action === "skip") toast.message("Skipped for this month");
       else toast.message("We'll ask again tomorrow");
       await refresh();
@@ -120,15 +134,15 @@ export function MoneyInHome() {
       {data.billPrompts.map((prompt) => (
         <section key={prompt.billId} className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
           <p className="text-xs tracking-wide text-muted-foreground uppercase">
-            {prompt.kind === "emi" ? "EMI" : prompt.kind === "rent" ? "Rent" : prompt.kind === "subscription" ? "Subscription" : "Bill"} · {ordinal(prompt.dayOfMonth)}
+            {prompt.kind === "emi" ? "EMI" : prompt.kind === "rent" ? "Rent" : prompt.kind === "subscription" ? "Subscription" : "Bill"} · cuts the {ordinal(prompt.dayOfMonth)}
           </p>
           <p className="mt-1 font-display text-3xl tracking-tight tabular">{formatMoney(prompt.amount, currency)}</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            {prompt.name} — did it leave {prompt.accountName}?
+            {prompt.name} — was this deducted from {prompt.accountName}?
           </p>
           <div className="mt-4 grid grid-cols-2 gap-2">
             <Button type="button" disabled={busy !== null} onClick={() => void answerBillDue(prompt.billId, "paid")}>
-              Paid
+              Deducted
             </Button>
             <Button type="button" variant="secondary" disabled={busy !== null} onClick={() => void answerBillDue(prompt.billId, "not_yet")}>
               Not yet

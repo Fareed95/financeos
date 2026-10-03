@@ -177,14 +177,14 @@ export const listTransactions = createServerFn({ method: "POST" })
       const limit = Math.min(Math.max(data.limit ?? 40, 1), 100);
       const offset = Math.max(data.offset ?? 0, 0);
       const sort = SORTS[data.sort ?? "newest"];
-      const clauses: string[] = ["t.user_id = $1", "t.affects_ledger = true"];
+      const clauses: string[] = ["t.user_id = $1"];
       const params: unknown[] = [userId];
       const add = (value: unknown, sqlFrag: string) => {
         params.push(value);
         clauses.push(sqlFrag.replace("?", `$${params.length}`));
       };
-      if (data.from) add(data.from, "t.transaction_date >= ?");
-      if (data.to) add(data.to, "t.transaction_date <= ?");
+      if (data.from) add(data.from, "t.transaction_date >= ?::date");
+      if (data.to) add(data.to, "t.transaction_date <= ?::date");
       if (data.categoryId) add(data.categoryId, "t.category_id = ?");
       if (data.accountId) add(data.accountId, "t.account_id = ?");
       if (data.projectId) add(data.projectId, "t.project_id = ?");

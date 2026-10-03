@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ASSET_KINDS, type AssetKind } from "@/lib/depreciation";
 import { formatMoney } from "@/lib/money";
 import { ordinal } from "@/lib/month-plan";
+import { allowCutReminders } from "@/lib/bill-reminders";
 import {
   BILL_KINDS,
   defaultUsefulYears,
@@ -101,6 +102,13 @@ function BillsBlock({
         data: { id: editing ?? undefined, name, kind, amount, dayOfMonth: Number(day), accountId: selectedAccount },
       });
       toast.success(editing ? "Bill updated" : "Bill saved");
+      const cut = ordinal(Number(day) || 1);
+      if (!editing) {
+        const perm = await allowCutReminders();
+        if (perm === "granted") toast.message(`On the ${cut} each month, your phone asks if it was deducted.`);
+        else if (perm === "denied") toast.message(`Home will ask on the ${cut}. Phone reminders are off.`);
+        else toast.message(`Home will ask on the ${cut}.`);
+      }
       setEditing(null);
       setAmount("");
       await onChanged();
@@ -116,7 +124,7 @@ function BillsBlock({
       <div>
         <h2 className="text-sm font-medium">Money out</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          EMI, rent you pay, subscriptions. From that date, home asks if it left. Until you tap Paid, the month's spend number holds it back.
+          EMI, rent, subscriptions, bills. Cuts on is the day the money leaves. From that day, home and your phone ask if it was deducted. Until you say yes, the month holds that amount back.
         </p>
       </div>
       {accounts.length > 0 && (
@@ -155,7 +163,7 @@ function BillsBlock({
               />
             </div>
             <div className="grid gap-1.5">
-              <Label htmlFor="bill-day">Due on</Label>
+              <Label htmlFor="bill-day">Cuts on</Label>
               <Input
                 id="bill-day"
                 inputMode="numeric"
@@ -165,7 +173,7 @@ function BillsBlock({
             </div>
           </div>
           <p className="-mt-2 text-xs text-muted-foreground">
-            Home asks from the {ordinal(Math.min(31, Math.max(1, Number(day) || 1)))}. Short months use the last day.
+            Every month on the {ordinal(Math.min(31, Math.max(1, Number(day) || 1)))}: was this deducted, or not yet? Same for EMI, rent, subscriptions and bills. Short months use the last day.
           </p>
           <div className="grid gap-1.5">
             <Label>Leaves</Label>
@@ -203,7 +211,7 @@ function BillsBlock({
                 <p className="tabular text-sm">{formatMoney(bill.amount, currency)}</p>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
-                {BILL_LABEL[bill.kind]} · {ordinal(bill.dayOfMonth)} · {bill.accountName}
+                {BILL_LABEL[bill.kind]} · cuts the {ordinal(bill.dayOfMonth)} · {bill.accountName}
                 {!bill.isActive ? " · Paused" : bill.checkin === "paid" ? " · Paid" : bill.checkin === "skipped" ? " · Skipped" : ""}
               </p>
               <div className="mt-3 flex flex-wrap gap-3 text-xs">

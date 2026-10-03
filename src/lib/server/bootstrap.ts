@@ -75,8 +75,9 @@ export const getBootstrap = createServerFn({ method: "POST" })
             from transactions
             where user_id = ${userId}
               and is_committed = true
-              and transaction_date >= ${from}
-              and transaction_date <= ${to}
+              and affects_ledger = true
+              and transaction_date >= ${from}::date
+              and transaction_date <= ${to}::date
           `,
           sql<{ net: string }>`
             select coalesce(sum(account_balance(id)), 0)::text as net

@@ -8,7 +8,7 @@ import { TxnEditSheet } from "@/components/finance/txn-edit-sheet";
 import { InstallAppCard } from "@/components/install-app";
 import { useQuickAdd } from "@/components/finance/quick-add";
 import { MoneyInHome } from "@/components/finance/money-in-home";
-import { formatMoney, isNegative, percentUsed } from "@/lib/money";
+import { formatMoney, isNegative, isZero, percentUsed } from "@/lib/money";
 import { listMySplits, markSplitSettled } from "@/lib/server/split-links";
 import { monthLabel } from "@/lib/utils";
 import { ArrowLeftRight, FolderKanban } from "lucide-react";
@@ -30,19 +30,18 @@ function Home() {
   const activeProjects = projects.filter((p) => p.status === "active" || p.status === "planned");
   const monthBudget = budgets.find((b) => !b.categoryId && b.startDate <= from && b.endDate >= from) ?? budgets[0];
   const netNegative = isNegative(stats.netWorth);
+  const accountCount = accounts.filter((a) => a.isActive).length;
+  const monthQuiet = isZero(stats.income) && isZero(stats.expense) && !isZero(stats.netWorth);
 
   return (
     <div className="space-y-8 pt-4">
       <header className="fos-enter">
-        <p className="text-xs tracking-wide text-muted-foreground uppercase">{monthLabel(from)}</p>
         <p className="mt-2 font-display text-5xl tracking-tight tabular">
           {formatMoney(stats.netWorth, currency)}
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
           {netNegative ? "Net position" : "Total balance"}
-          {accounts.filter((a) => a.isActive).length
-            ? ` · ${accounts.filter((a) => a.isActive).length} accounts`
-            : ""}
+          {accountCount ? ` · ${accountCount} ${accountCount === 1 ? "account" : "accounts"}` : ""}
         </p>
       </header>
 
@@ -50,10 +49,18 @@ function Home() {
 
       <InstallAppCard className="fos-enter fos-enter-delay-1" dismissible />
 
-      <section className="fos-enter fos-enter-delay-1 grid grid-cols-3 gap-2">
-        <Stat label="Income" value={formatMoney(stats.income, currency)} tone="text-income" />
-        <Stat label="Expenses" value={formatMoney(stats.expense, currency)} tone="text-expense" />
-        <Stat label="Savings" value={formatMoney(stats.savings, currency)} />
+      <section className="fos-enter fos-enter-delay-1 space-y-2">
+        <p className="text-xs tracking-wide text-muted-foreground uppercase">{monthLabel(from)}</p>
+        <div className="grid grid-cols-3 gap-2">
+          <Stat label="Income" value={formatMoney(stats.income, currency)} tone="text-income" />
+          <Stat label="Expenses" value={formatMoney(stats.expense, currency)} tone="text-expense" />
+          <Stat label="Savings" value={formatMoney(stats.savings, currency)} />
+        </div>
+        {monthQuiet && (
+          <p className="text-sm text-muted-foreground">
+            Nothing posted in {monthLabel(from)}. The balance above is the account, not this month.
+          </p>
+        )}
       </section>
 
       {(splits.data?.length ?? 0) > 0 && (
