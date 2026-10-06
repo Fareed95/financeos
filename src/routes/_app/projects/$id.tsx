@@ -59,6 +59,8 @@ function ProjectDetail() {
   const { project, insights, transactions, viewerRole } = q.data;
   const isOwner = viewerRole === "owner";
   const isTrip = project.projectType === "trip";
+  const hasBudget = !isZero(insights.budget);
+  const hasEnd = Boolean(project.endDate);
   const remainingNegative = isNegative(insights.remaining);
   const catTotal = insights.categoryBreakdown.reduce((sum, row) => addMoney(sum, row.amount), "0.00");
   const shownSpend =
@@ -90,7 +92,7 @@ function ProjectDetail() {
 
       {isTrip ? (
         <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-          <Metric label="Budget" value={formatMoney(insights.budget, currency)} />
+          {hasBudget && <Metric label="Budget" value={formatMoney(insights.budget, currency)} />}
           <Metric
             label={project.collaboration === "collaborative" ? "Spent" : "Total cost"}
             value={formatMoney(shownSpend, currency)}
@@ -99,12 +101,13 @@ function ProjectDetail() {
           <Metric label="During trip" value={formatMoney(insights.duringTrip, currency)} />
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-2">
-          <Metric label="Budget" value={formatMoney(project.budget, currency)} />
+        <div className={hasBudget ? "grid grid-cols-2 gap-2" : "grid grid-cols-1 gap-2"}>
+          {hasBudget && <Metric label="Budget" value={formatMoney(project.budget, currency)} />}
           <Metric label="Spent" value={formatMoney(shownSpend, currency)} />
         </div>
       )}
 
+      {hasBudget && (
       <section className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
         <div className="flex items-baseline justify-between">
           <p className="text-sm font-medium">Remaining</p>
@@ -133,6 +136,7 @@ function ProjectDetail() {
           </p>
         )}
       </section>
+      )}
 
       <ProjectCollab projectId={project.id} />
 
@@ -140,12 +144,14 @@ function ProjectDetail() {
         <section className="grid grid-cols-2 gap-2 md:grid-cols-4">
           <Metric label="Today" value={formatMoney(insights.todaySpend, currency)} />
           <Metric label="Avg / day" value={formatMoney(insights.averageDaily, currency)} />
-          <Metric label="Days left" value={String(insights.remainingDays)} />
-          <Metric
-            label="Daily limit"
-            value={formatMoney(insights.recommendedDaily, currency)}
-            hint={insights.overDaily ? "Today is above the suggested pace." : undefined}
-          />
+          {hasEnd && <Metric label="Days left" value={String(insights.remainingDays)} />}
+          {hasEnd && hasBudget && (
+            <Metric
+              label="Daily limit"
+              value={formatMoney(insights.recommendedDaily, currency)}
+              hint={insights.overDaily ? "Today is above the suggested pace." : undefined}
+            />
+          )}
         </section>
       )}
 

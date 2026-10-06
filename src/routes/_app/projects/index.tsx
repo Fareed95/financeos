@@ -11,7 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { upsertProject } from "@/lib/server/projects";
 import { PROJECT_STATUS_LABELS, PROJECT_TYPE_LABELS } from "@/lib/constants";
-import { percentUsed } from "@/lib/money";
+import { percentUsed, isZero, formatMoney } from "@/lib/money";
 import type { ProjectStatus, ProjectType } from "@/lib/types";
 import { FolderKanban } from "lucide-react";
 import { toast } from "sonner";
@@ -58,13 +58,19 @@ function ProjectsPage() {
                   {p.collaboration === "collaborative" ? " · Shared" : ""}
                 </p>
               </div>
-              <BudgetBar
-                className="mt-3"
-                spent={p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost}
-                amount={p.budget}
-                percent={percentUsed(p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost, p.budget)}
-                currency={currency}
-              />
+              {isZero(p.budget) ? (
+                <p className="mt-3 text-sm tabular text-muted-foreground">
+                  Spent {formatMoney(p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost, currency)}
+                </p>
+              ) : (
+                <BudgetBar
+                  className="mt-3"
+                  spent={p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost}
+                  amount={p.budget}
+                  percent={percentUsed(p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost, p.budget)}
+                  currency={currency}
+                />
+              )}
             </Link>
           ))}
         </div>
@@ -178,19 +184,22 @@ export function ProjectSheet({
             </Select>
           </div>
           <div className="grid gap-1.5">
-            <Label htmlFor="p-budget">Budget</Label>
-            <Input id="p-budget" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} />
+            <Label htmlFor="p-budget">Budget, optional</Label>
+            <Input id="p-budget" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder="Leave blank if there's no cap" />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="grid gap-1.5">
-              <Label htmlFor="p-start">Start</Label>
+              <Label htmlFor="p-start">Start, optional</Label>
               <Input id="p-start" type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
             </div>
             <div className="grid gap-1.5">
-              <Label htmlFor="p-end">End</Label>
+              <Label htmlFor="p-end">End, optional</Label>
               <Input id="p-end" type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
             </div>
           </div>
+          <p className="-mt-2 text-xs text-muted-foreground">
+            A long-running project doesn't need a budget or an end date. Remaining only shows when you set a budget.
+          </p>
           <div className="grid gap-1.5">
             <Label>Status</Label>
             <Select value={status} onValueChange={(v) => setStatus(v as ProjectStatus)}>

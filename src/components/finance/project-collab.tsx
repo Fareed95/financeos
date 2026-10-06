@@ -6,6 +6,15 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   acceptInvite,
   addProjectExpense,
   createProjectInvite,
@@ -15,6 +24,7 @@ import {
   listProjectInvites,
   listProjectMembers,
   removeProjectMember,
+  closeMemberBalance,
   revokeInvite,
 } from "@/lib/server/collab";
 import { formatMoney, isNegative, isZero } from "@/lib/money";
@@ -31,6 +41,8 @@ export function ProjectCollab({ projectId }: { projectId: string }) {
   const [expenseOpen, setExpenseOpen] = useState(false);
   const [settleOpen, setSettleOpen] = useState(false);
   const [link, setLink] = useState<string | null>(null);
+  const [exitFor, setExitFor] = useState<{ userId: string; name: string } | null>(null);
+  const [exitBusy, setExitBusy] = useState(false);
 
   const members = useQuery({
     queryKey: ["project-members", projectId],
@@ -59,6 +71,16 @@ export function ProjectCollab({ projectId }: { projectId: string }) {
   const settled = isZero(you);
   const owed = !isNegative(you) && !settled;
   const spend = balances.data?.spend;
+  const openPayments = [...(balances.data?.payments ?? []), ...(balances.data?.privatePayments ?? [])];
+  const activeIds = new Set(people.map((person) => person.userId));
+  const formerIds = [
+    ...new Set(
+      openPayments
+        .filter((payment) => payment.former)
+        .flatMap((payment) => [payment.fromUserId, payment.toUserId])
+        .filter((id) => !activeIds.has(id)),
+    ),
+  ];
 
   async function reload() {
     await Promise.all([
@@ -68,6 +90,27 @@ export function ProjectCollab({ projectId }: { projectId: string }) {
       qc.invalidateQueries({ queryKey: ["project", projectId] }),
       refresh(),
     ]);
+  }
+
+  async function dropMember(userId: string) {
+    await removeProjectMember({ data: { projectId, userId } });
+    toast.success("Removed");
+    await reload();
+  }
+
+  async function closeExit(mode: "forgive" | "settle") {
+    if (!exitFor) return;
+    setExitBusy(true);
+    try {
+      await closeMemberBalance({ data: { projectId, userId: exitFor.userId, mode } });
+      toast.success(mode === "forgive" ? "Written off" : "Marked settled");
+      setExitFor(null);
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't close that");
+    } finally {
+      setExitBusy(false);
+    }
   }
 
   if (members.data && members.data.collaboration !== "collaborative") {
@@ -131,21 +174,40 @@ export function ProjectCollab({ projectId }: { projectId: string }) {
         payments={balances.data?.payments ?? []}
         privatePayments={balances.data?.privatePayments ?? []}
         quiet={settled && (balances.data?.payments ?? []).length === 0 && (balances.data?.privatePayments ?? []).length === 0 && (!spend || isZero(spend.sharedSpend))}
-        quietNote={
-          spend && !isZero(spend.personalSpend)
-            ? "Nothing shared yet. Your own expenses still come out of the budget above."
-            : "Nothing shared yet."
-        }
+        quietNote={spend && !isZero(spend.personalSpend) ? "Nothing shared yet. Your own expenses stay on this project." : "Nothing shared yet."}
         onAdd={() => setExpenseOpen(true)}
         onSettle={() => setSettleOpen(true)}
       />
+      {formerIds.map((id) => {
+        const lines = openPayments.filter((payment) => payment.fromUserId === id || payment.toUserId === id);
+        const name = lines[0]?.fromUserId === id ? lines[0].fromName : lines[0]?.toName ?? "Someone";
+        return (
+          <div key={id} className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
+            <p className="text-sm font-medium">{name} left with an open amount</p>
+            <div className="mt-2 space-y-1">
+              {lines.map((payment) => (
+                <p key={`${payment.fromUserId}-${payment.toUserId}-${payment.amount}`} className="text-sm text-muted-foreground">
+                  {payment.fromName} still owes {payment.toName} {formatMoney(payment.amount, currency)}
+                </p>
+              ))}
+            </div>
+            <div className="mt-3 flex gap-2">
+              <Button type="button" variant="secondary" className="h-11 flex-1" onClick={() => setExitFor({ userId: id, name })}>
+                Forgive or settle
+              </Button>
+            </div>
+          </div>
+        );
+      })}
       {(balances.data?.history ?? []).length > 0 && (
         <div className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
           <p className="text-sm font-medium">Settlements</p>
           <div className="mt-2 space-y-2">
             {balances.data?.history.map((item) => (
               <p key={item.id} className="text-sm text-muted-foreground">
-                {item.fromName} paid {item.toName} {formatMoney(item.amount, currency)} · {item.method}
+                {item.note === "Written off"
+                  ? `${item.fromName}'s ${formatMoney(item.amount, currency)} to ${item.toName} was written off`
+                  : `${item.fromName} paid ${item.toName} ${formatMoney(item.amount, currency)} · ${item.method}`}
               </p>
             ))}
           </div>
@@ -168,10 +230,18 @@ export function ProjectCollab({ projectId }: { projectId: string }) {
                   <Button
                     variant="ghost"
                     className="text-expense"
-                    onClick={async () => {
-                      await removeProjectMember({ data: { projectId, userId: p.userId } });
-                      toast.success("Removed");
-                      await reload();
+                    onClick={() => {
+                      const lines = openPayments.filter(
+                        (payment) => payment.fromUserId === p.userId || payment.toUserId === p.userId,
+                      );
+                      if (lines.length === 0) {
+                        void dropMember(p.userId).catch((err) =>
+                          toast.error(err instanceof Error ? err.message : "Couldn't remove"),
+                        );
+                        return;
+                      }
+                      setMembersOpen(false);
+                      setExitFor({ userId: p.userId, name: p.name });
                     }}
                   >
                     Remove
@@ -248,10 +318,44 @@ export function ProjectCollab({ projectId }: { projectId: string }) {
         open={settleOpen}
         onOpenChange={setSettleOpen}
         projectId={projectId}
-        people={people}
+        people={[
+          ...people,
+          ...formerIds
+            .filter((id) => !people.some((person) => person.userId === id))
+            .map((id) => {
+              const line = openPayments.find((payment) => payment.fromUserId === id || payment.toUserId === id);
+              const name = line?.fromUserId === id ? line.fromName : line?.toName ?? "Former member";
+              return { userId: id, name };
+            }),
+        ]}
         suggestion={balances.data?.payments[0]}
         onSaved={reload}
       />
+      <AlertDialog open={exitFor !== null} onOpenChange={(open) => !open && !exitBusy && setExitFor(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{exitFor ? `${exitFor.name} has an open amount` : "Open amount"}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {exitFor
+                ? openPayments
+                    .filter((payment) => payment.fromUserId === exitFor.userId || payment.toUserId === exitFor.userId)
+                    .map((payment) => `${payment.fromName} owes ${payment.toName} ${formatMoney(payment.amount, currency)}`)
+                    .join(". ") || "Nothing is open."
+                : ""}
+              {" "}Forgive it, or mark it settled. Either way they leave the project.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={exitBusy}>Cancel</AlertDialogCancel>
+            <Button type="button" variant="secondary" disabled={exitBusy} onClick={() => void closeExit("forgive")}>
+              Forgive
+            </Button>
+            <Button type="button" disabled={exitBusy} onClick={() => void closeExit("settle")}>
+              Settle it
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   );
 }

@@ -51,6 +51,15 @@ async function memberIds(sql: Sql, projectId: string, ownerId: string) {
   return ids;
 }
 
+async function anyoneOnProject(sql: Sql, projectId: string, ownerId: string) {
+  const rows = await sql<{ user_id: string }>`
+    select user_id from project_members where project_id = ${projectId}
+  `;
+  const ids = new Set(rows.map((r) => r.user_id));
+  ids.add(ownerId);
+  return ids;
+}
+
 export async function readMembers(sql: Sql, userId: string, projectId: string) {
   const gate = await access(sql, userId, projectId);
   if (!gate) throw new Error("Project not found");
@@ -196,8 +205,8 @@ export async function writeSettlement(
 ) {
   const gate = await access(sql, userId, data.projectId);
   if (!gate) throw new Error("Project not found");
-  const people = await memberIds(sql, data.projectId, gate.project.user_id);
-  if (!people.has(data.fromUserId) || !people.has(data.toUserId)) throw new Error("Pick people on this project");
+  const known = await anyoneOnProject(sql, data.projectId, gate.project.user_id);
+  if (!known.has(data.fromUserId) || !known.has(data.toUserId)) throw new Error("Pick people on this project");
   if (data.fromUserId === data.toUserId) throw new Error("Settlement needs two people");
   const amount = parseMoney(data.amount);
   if (amount.startsWith("-") || amount === "0.00") throw new Error("Amount must be greater than zero");
@@ -223,16 +232,18 @@ export async function writeSettlement(
 }
 
 export async function readGroupBalances(sql: Sql, userId: string, projectId: string) {
-  const names = await sql<{ user_id: string; full_name: string | null }>`
-    select m.user_id, p.full_name from project_members m
+  const names = await sql<{ user_id: string; full_name: string | null; status: string }>`
+    select m.user_id, p.full_name, m.status from project_members m
     left join profiles p on p.id = m.user_id
-    where m.project_id = ${projectId} and m.status = 'active'
+    where m.project_id = ${projectId}
     union
-    select pr.user_id, p.full_name from projects pr
+    select pr.user_id, p.full_name, 'active' from projects pr
     left join profiles p on p.id = pr.user_id
     where pr.id = ${projectId}
   `;
   const nameOf = new Map(names.map((row) => [row.user_id, row.full_name || "Member"]));
+  const active = new Set(names.filter((row) => row.status === "active").map((row) => row.user_id));
+  const former = (id: string) => !active.has(id);
   const { plan, mine, privatePlan } = await loadProjectBalances(sql, projectId, userId);
   const spend = await loadViewerSpend(sql, projectId, userId);
   const history = await sql<{
@@ -259,11 +270,13 @@ export async function readGroupBalances(sql: Sql, userId: string, projectId: str
       ...payment,
       fromName: nameOf.get(payment.fromUserId) || "Member",
       toName: nameOf.get(payment.toUserId) || "Member",
+      former: former(payment.fromUserId) || former(payment.toUserId),
     })),
     privatePayments: privatePlan.map((payment) => ({
       ...payment,
       fromName: nameOf.get(payment.fromUserId) || "Member",
       toName: nameOf.get(payment.toUserId) || "Member",
+      former: former(payment.fromUserId) || former(payment.toUserId),
     })),
     history: history.map((row) => ({
       id: row.id,
@@ -485,6 +498,43 @@ export const removeProjectMember = createServerFn({ method: "POST" })
       return { ok: true };
     } catch (err) {
       publicError(err, "Couldn't remove that member.");
+    }
+  });
+
+export const closeMemberBalance = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; userId: string; mode: "forgive" | "settle" }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      const gate = await access(sql, context.userId, data.projectId);
+      if (!gate || gate.role !== "owner") throw new Error("Only the owner can close this");
+      if (data.mode !== "forgive" && data.mode !== "settle") throw new Error("Choose forgive or settle");
+      if (data.userId === gate.project.user_id) throw new Error("The owner stays on the project");
+      const { plan, privatePlan } = await loadProjectBalances(sql, data.projectId, context.userId);
+      const open = [...plan, ...privatePlan].filter(
+        (payment) => payment.fromUserId === data.userId || payment.toUserId === data.userId,
+      );
+      for (const payment of open) {
+        await sql`
+          insert into settlements (
+            id, project_id, from_user_id, to_user_id, amount, payment_method, note,
+            status, created_by, completed_at
+          ) values (
+            ${crypto.randomUUID()}, ${data.projectId}, ${payment.fromUserId}, ${payment.toUserId},
+            ${payment.amount}::numeric, ${data.mode === "forgive" ? "other" : "upi"},
+            ${data.mode === "forgive" ? "Written off" : null},
+            'completed', ${context.userId}, now()
+          )
+        `;
+      }
+      await sql`
+        update project_members set status = 'removed'
+        where project_id = ${data.projectId} and user_id = ${data.userId} and status = 'active'
+      `;
+      return { ok: true, cleared: open.length };
+    } catch (err) {
+      publicError(err, "Couldn't close that balance.");
     }
   });
 

@@ -146,13 +146,19 @@ function Home() {
                     {p.collaboration === "collaborative" ? " · Shared" : ""}
                   </p>
                 </div>
-                <BudgetBar
-                  className="mt-3"
-                  spent={p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost}
-                  amount={p.budget}
-                  percent={percentUsed(p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost, p.budget)}
-                  currency={currency}
-                />
+                {isZero(p.budget) ? (
+                  <p className="mt-3 text-sm tabular text-muted-foreground">
+                    Spent {formatMoney(p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost, currency)}
+                  </p>
+                ) : (
+                  <BudgetBar
+                    className="mt-3"
+                    spent={p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost}
+                    amount={p.budget}
+                    percent={percentUsed(p.collaboration === "collaborative" ? p.viewerSpend : p.totalCost, p.budget)}
+                    currency={currency}
+                  />
+                )}
               </Link>
             ))}
           </div>
