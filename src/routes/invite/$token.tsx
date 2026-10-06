@@ -1,10 +1,13 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Navigate, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { acceptInvite, previewInvite } from "@/lib/server/collab";
+import { getBootstrap } from "@/lib/server/bootstrap";
 import { Button } from "@/components/ui/button";
 import { BrandLoader } from "@/components/brand-loader";
 import { APP_NAME } from "@/lib/constants";
+import { rememberReturn } from "@/lib/return-to";
+import { endOfMonthISO, startOfMonthISO } from "@/lib/utils";
 import { toast } from "sonner";
 import { useState } from "react";
 
@@ -20,22 +23,36 @@ function InvitePage() {
     enabled: Boolean(user),
     queryFn: () => previewInvite({ data: { token } }),
   });
+  const from = startOfMonthISO();
+  const to = endOfMonthISO();
+  const ready = useQuery({
+    queryKey: ["bootstrap", from, to, user?.id],
+    enabled: Boolean(user),
+    queryFn: () =>
+      getBootstrap({ data: { from, to, displayName: user?.displayName ?? user?.primaryEmail ?? null } }),
+  });
+  const returnPath = `/invite/${token}`;
 
   if (isPending) return <BrandLoader />;
   if (!user) {
+    rememberReturn(returnPath);
     return (
       <main className="grid min-h-dvh place-items-center px-6 text-center">
         <div className="max-w-sm space-y-4">
           <p className="font-display text-3xl">{APP_NAME}</p>
-          <p className="text-sm text-muted-foreground">Sign in to see this project invite.</p>
-          <Button className="h-11 w-full" onClick={() => { window.location.href = `/login?next=/invite/${token}`; }}>
-            Sign in
+          <p className="text-sm text-muted-foreground">Sign in or create an account to see this project invite.</p>
+          <Button className="h-11 w-full" onClick={() => { window.location.href = `/login?next=${encodeURIComponent(returnPath)}`; }}>
+            Continue
           </Button>
         </div>
       </main>
     );
   }
-  if (q.isPending) return <BrandLoader label="Opening invite…" />;
+  if (ready.isPending || q.isPending) return <BrandLoader label="Opening invite…" />;
+  if (ready.data && (!ready.data.profile.onboardingCompleted || ready.data.accounts.length === 0)) {
+    rememberReturn(returnPath);
+    return <Navigate to="/onboarding" />;
+  }
   if (q.error || !q.data) {
     return (
       <main className="grid min-h-dvh place-items-center px-6 text-center">
@@ -48,6 +65,7 @@ function InvitePage() {
   return (
     <main className="grid min-h-dvh place-items-center px-6">
       <div className="w-full max-w-sm space-y-4 text-center">
+        <p className="text-xs tracking-wide text-muted-foreground uppercase">Invited to this project</p>
         <p className="text-sm text-muted-foreground">{invite.invitedBy} invited you</p>
         <h1 className="font-display text-3xl">{invite.projectName}</h1>
         {invite.state === "open" && (

@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { InstallAppCard } from "@/components/install-app";
+import { peekReturn, rememberReturn, safeReturnPath } from "@/lib/return-to";
 
 export const Route = createFileRoute("/login")({ component: Login });
 
@@ -23,7 +24,15 @@ function Login() {
   const [busy, setBusy] = useState(false);
 
   if (isPending) return <BrandLoader label="Opening the door…" />;
-  if (user) return <Navigate to="/" />;
+  const queryNext = typeof window === "undefined" ? null : safeReturnPath(new URLSearchParams(window.location.search).get("next"));
+  if (queryNext) rememberReturn(queryNext);
+  if (user) {
+    if (queryNext) {
+      window.location.replace(queryNext);
+      return <BrandLoader label="Opening your invite…" />;
+    }
+    return <Navigate to="/" />;
+  }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -44,8 +53,8 @@ function Login() {
         });
         if (err) throw new Error(err.message ?? "Could not sign in");
       }
-      const next = new URLSearchParams(window.location.search).get("next");
-      window.location.href = next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+      const next = safeReturnPath(new URLSearchParams(window.location.search).get("next")) ?? peekReturn();
+      window.location.href = next ?? "/";
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
       setBusy(false);
@@ -98,7 +107,11 @@ function Login() {
                       type="button"
                       variant="outline"
                       className="h-11 w-full justify-center rounded-lg"
-                      onClick={() => signIn(p.providerId, { callbackURL: "/" })}
+                      onClick={() => {
+                        const next = safeReturnPath(new URLSearchParams(window.location.search).get("next")) ?? peekReturn() ?? "/";
+                        rememberReturn(next === "/" ? null : next);
+                        void signIn(p.providerId, { callbackURL: next });
+                      }}
                     >
                       {p.idp === "google" ? <GoogleMark /> : <XMark />}
                       Continue with {p.label}

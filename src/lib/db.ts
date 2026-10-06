@@ -1,5 +1,6 @@
 import { pendingMigrations } from "../../scripts/migration-plan.mjs";
 
+
 /** Which database backend is active. */
 export type DbSource = "neon" | "pglite";
 
@@ -132,6 +133,7 @@ async function createPgliteSql(): Promise<Sql> {
   // Apply migrations/ (the single schema source) so preview matches production.
   // Includes income sources, recurring bills, and owned assets.
   // SQL is inlined by the bundler via import.meta.glob (no runtime fs); applied
+  // once per filename, including invoice v2.
   // files are tracked in _migrations. The glob does not descend, so the opt-in
   // auth schema under migrations/auth/ stays out. Runs once per module instance
   // — so an HMR reload after adding a migration file applies it live — with

@@ -6,6 +6,7 @@ import type { Project } from "@/lib/types";
 import { fromCents, parseMoney, subMoney, toCents } from "@/lib/money";
 import { publicError } from "@/lib/utils";
 import { planOpenParts, saveSplitLinks, type ShareLink } from "@/lib/server/split-links";
+import { notifyProjectActivity } from "@/lib/server/notices";
 import {
   allocateSplits,
   applyExpense,
@@ -188,6 +189,15 @@ export async function writeSplitExpense(
       )
     `;
   }
+  if (gate.project.collaboration === "collaborative") {
+    await notifyProjectActivity(sql, {
+      projectId: data.projectId,
+      actorId: userId,
+      kind: "expense",
+      amount,
+      description: data.description,
+    });
+  }
   return { id, allocations };
 }
 
@@ -228,6 +238,13 @@ export async function writeSettlement(
     if (message.includes("settlements_pending")) throw new Error("That settlement is already pending");
     throw err;
   }
+  await notifyProjectActivity(sql, {
+    projectId: data.projectId,
+    actorId: userId,
+    kind: "settled",
+    amount,
+    description: data.note,
+  });
   return { id, amount };
 }
 

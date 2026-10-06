@@ -14,6 +14,7 @@ import { OfflineBanner } from "@/components/offline-banner";
 import { UserButton } from "@/lib/auth/gates";
 import { cn } from "@/lib/utils";
 import { QuickAddFab, QuickAddSheet } from "@/components/finance/quick-add";
+import { NotifyGate } from "@/components/finance/notify-gate";
 import { useVisualKeyboard } from "@/hooks/use-visual-keyboard";
 
 const DESKTOP = [
@@ -105,6 +106,7 @@ export function AppShell() {
               : "max-w-5xl px-4 pb-28 md:px-8 md:pb-12",
           )}
         >
+          {!isAssistant && <NotifyGate />}
           <Outlet />
         </main>
       </div>

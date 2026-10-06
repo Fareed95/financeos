@@ -40,7 +40,7 @@ function OnboardingGuard({ children }: { children: ReactNode }) {
       </main>
     );
   }
-  if (data && !data.profile.onboardingCompleted) {
+  if (data && (!data.profile.onboardingCompleted || data.accounts.length === 0)) {
     return <Navigate to="/onboarding" />;
   }
   return <>{children}</>;

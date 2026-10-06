@@ -1,5 +1,5 @@
-import { createFileRoute, Navigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { createFileRoute } from "@tanstack/react-router";
+import { useEffect, useRef, useState } from "react";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { RedirectToSignIn } from "@/lib/auth/gates";
 import { BrandLoader } from "@/components/brand-loader";
@@ -13,6 +13,7 @@ import { upsertBudget } from "@/lib/server/budgets";
 import { ACCOUNT_TYPE_LABELS, CURRENCY_LABELS } from "@/lib/constants";
 import { CURRENCIES, type AccountType } from "@/lib/types";
 import { endOfMonthISO, startOfMonthISO } from "@/lib/utils";
+import { consumeReturn } from "@/lib/return-to";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
@@ -38,14 +39,41 @@ function Onboarding() {
   const [opening, setOpening] = useState("0");
   const [budget, setBudget] = useState("");
   const [busy, setBusy] = useState(false);
+  const sent = useRef(false);
+  const needsAccount = (query.data?.accounts.length ?? 0) === 0;
+  const readyToLeave = Boolean(query.data?.profile.onboardingCompleted && !needsAccount);
 
-  if (isPending || (user && query.isPending)) {
+  useEffect(() => {
+    if (!readyToLeave || sent.current) return;
+    sent.current = true;
+    const back = consumeReturn();
+    window.location.replace(back ?? "/");
+  }, [readyToLeave]);
+
+  if (isPending || (user && query.isPending) || readyToLeave) {
     return <BrandLoader />;
   }
   if (!user) return <RedirectToSignIn />;
-  if (query.data?.profile.onboardingCompleted) return <Navigate to="/" />;
 
-  async function finish(skipRest = false) {
+  function goNext() {
+    const back = consumeReturn();
+    window.location.href = back ?? "/";
+  }
+
+  async function saveAccount() {
+    const account = accountName.trim();
+    if (!account) throw new Error("Add an account. You can't log money without one.");
+    await upsertAccount({
+      data: {
+        name: account,
+        type: accountType,
+        openingBalance: opening || "0",
+        currency,
+      },
+    });
+  }
+
+  async function finish() {
     setBusy(true);
     try {
       await updateProfile({
@@ -55,33 +83,34 @@ function Onboarding() {
           onboardingCompleted: true,
         },
       });
-      if (!skipRest) {
-        if (accountName.trim()) {
-          await upsertAccount({
-            data: {
-              name: accountName.trim(),
-              type: accountType,
-              openingBalance: opening || "0",
-              currency,
-            },
-          });
-        }
-        if (budget.trim()) {
-          await upsertBudget({
-            data: {
-              name: `${new Date().toLocaleString("en-IN", { month: "long" })} budget`,
-              amount: budget,
-              period: "monthly",
-              startDate: from,
-              endDate: to,
-            },
-          });
-        }
+      if (needsAccount) await saveAccount();
+      if (budget.trim()) {
+        await upsertBudget({
+          data: {
+            name: `${new Date().toLocaleString("en-IN", { month: "long" })} budget`,
+            amount: budget,
+            period: "monthly",
+            startDate: from,
+            endDate: to,
+          },
+        });
       }
       await qc.invalidateQueries();
-      window.location.href = "/";
+      goNext();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't finish setup");
+      setBusy(false);
+    }
+  }
+
+  async function saveAccountOnly() {
+    setBusy(true);
+    try {
+      await saveAccount();
+      await qc.invalidateQueries();
+      goNext();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't save that account");
       setBusy(false);
     }
   }
@@ -122,6 +151,7 @@ function Onboarding() {
       title: "First account",
       body: (
         <div className="grid gap-3">
+          <p className="text-sm text-muted-foreground">Required. Money needs a place to land — UPI, bank, or cash.</p>
           <div className="grid gap-1.5">
             <Label htmlFor="ob-acc">Name</Label>
             <Input id="ob-acc" value={accountName} onChange={(e) => setAccountName(e.target.value)} />
@@ -167,6 +197,21 @@ function Onboarding() {
   ];
 
   const current = steps[step]!;
+  const accountOnly = query.data?.profile.onboardingCompleted && needsAccount;
+
+  if (accountOnly) {
+    return (
+      <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center px-5 py-12">
+        <p className="font-display text-2xl tracking-tight">Kharcha</p>
+        <h1 className="mt-8 font-display text-3xl tracking-tight">Add an account</h1>
+        <p className="mt-2 text-sm text-muted-foreground">You need one account before you can log money.</p>
+        <div className="mt-6">{steps[2]!.body}</div>
+        <Button type="button" className="mt-8" disabled={busy} onClick={() => void saveAccountOnly()}>
+          {busy ? "Saving…" : "Save account"}
+        </Button>
+      </main>
+    );
+  }
 
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center px-5 py-12">
@@ -183,23 +228,25 @@ function Onboarding() {
           </Button>
         )}
         {step < steps.length - 1 ? (
-          <Button type="button" className="flex-1" onClick={() => setStep(step + 1)}>
+          <Button
+            type="button"
+            className="flex-1"
+            onClick={() => {
+              if (step === 2 && needsAccount && !accountName.trim()) {
+                toast.error("Add an account. You can't log money without one.");
+                return;
+              }
+              setStep(step + 1);
+            }}
+          >
             Continue
           </Button>
         ) : (
-          <Button type="button" className="flex-1" disabled={busy} onClick={() => void finish(false)}>
+          <Button type="button" className="flex-1" disabled={busy} onClick={() => void finish()}>
             {busy ? "Saving…" : "Get started"}
           </Button>
         )}
       </div>
-      <button
-        type="button"
-        className="mt-4 text-sm text-muted-foreground underline-offset-4 hover:underline"
-        onClick={() => void finish(true)}
-        disabled={busy}
-      >
-        Skip for now
-      </button>
     </main>
   );
 }

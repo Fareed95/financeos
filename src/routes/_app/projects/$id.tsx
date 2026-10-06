@@ -28,6 +28,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { ProjectCollab } from "@/components/finance/project-collab";
+import { BusinessWorkspace } from "@/components/finance/business-workspace";
 import { toast } from "sonner";
 
 const CATEGORY_ICON = Object.fromEntries(DEFAULT_CATEGORIES.map((c) => [c.name, c.icon]));
@@ -67,6 +68,21 @@ function ProjectDetail() {
     project.collaboration === "collaborative"
       ? subMoney(insights.mySpend, insights.myIncome)
       : insights.totalCost;
+
+  if (project.projectType === "business") {
+    return (
+      <div className="space-y-6 pt-4 pb-16">
+        <div>
+          <Link to="/projects" className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+            <ArrowLeft className="size-3.5" /> Projects
+          </Link>
+          <h1 className="mt-2 font-display text-3xl tracking-tight">{project.name}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Business books. Split and settle stay off this workspace.</p>
+        </div>
+        <BusinessWorkspace projectId={project.id} currency={currency} />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 pt-4 pb-16">

@@ -3,6 +3,7 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { ensureUser, ownedAccount, ownedCategory, ownedProject } from "@/lib/server/ensure";
 import { mapTxn, TXN_FROM, TXN_SELECT } from "@/lib/server/map";
 import { assertNoSettledEdit, readMembers } from "@/lib/server/collab";
+import { notifyProjectActivity } from "@/lib/server/notices";
 import { parseMoney } from "@/lib/money";
 import { allocateSplits, type SplitMethod } from "@/lib/split";
 import { clearSplitLinks, planOpenParts, saveSplitLinks, type OpenPartInput, type ShareLink } from "@/lib/server/split-links";
@@ -384,6 +385,16 @@ export const upsertTransaction = createServerFn({ method: "POST" })
           data.origin,
           data.description ?? null,
         );
+      }
+
+      if (!data.id && data.projectId && (data.isCommitted ?? true) && (data.type === "expense" || data.type === "income")) {
+        await notifyProjectActivity(sql, {
+          projectId: data.projectId,
+          actorId: userId,
+          kind: data.type === "income" ? "income" : "expense",
+          amount,
+          description: data.description,
+        });
       }
 
       const saved = await fetchTxn(sql, userId, id);

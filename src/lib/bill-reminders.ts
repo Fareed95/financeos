@@ -73,3 +73,23 @@ export async function notifyCutReminders(items: CutReminder[], today: string) {
   }
   localStorage.setItem(STORAGE, JSON.stringify(fresh));
 }
+
+export async function showPhoneNotice(item: { id: string; title: string; body: string; href: string }) {
+  if (!supported() || Notification.permission !== "granted") return;
+  const reg = await worker();
+  const tag = `kharcha-project-${item.id}`;
+  if (reg) {
+    await reg.showNotification(item.title, {
+      body: item.body,
+      tag,
+      icon: "/icon-192.png",
+      data: { url: item.href },
+    });
+    return;
+  }
+  const note = new Notification(item.title, { body: item.body, tag, icon: "/icon-192.png" });
+  note.onclick = () => {
+    window.focus();
+    window.location.assign(item.href);
+  };
+}
