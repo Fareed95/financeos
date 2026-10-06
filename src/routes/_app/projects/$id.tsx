@@ -77,9 +77,9 @@ function ProjectDetail() {
             <ArrowLeft className="size-3.5" /> Projects
           </Link>
           <h1 className="mt-2 font-display text-3xl tracking-tight">{project.name}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Business books. Split and settle stay off this workspace.</p>
+          <p className="mt-1 text-sm text-muted-foreground">Business</p>
         </div>
-        <BusinessWorkspace projectId={project.id} currency={currency} />
+        <BusinessWorkspace projectId={project.id} projectName={project.name} currency={currency} />
       </div>
     );
   }

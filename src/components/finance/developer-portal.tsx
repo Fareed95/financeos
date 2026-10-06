@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { API_ROUTES } from "@/lib/api-routes";
 import { SCOPES, createBusinessApiKey, getBusiness, listBusinessApiLogs, revokeBusinessApiKey, rotateBusinessApiKey } from "@/lib/server/business";
+import { disableWebhook, rotateWebhookSecret, saveWebhookEndpoint, webhookDesk } from "@/lib/server/ops";
 import { todayISO } from "@/lib/utils";
 
 const GROUPS: { label: string; scopes: string[] }[] = [
@@ -14,6 +15,9 @@ const GROUPS: { label: string; scopes: string[] }[] = [
   { label: "Expenses", scopes: ["expenses:read", "expenses:create"] },
   { label: "Reports", scopes: ["reports:read", "accounting:read"] },
   { label: "Journals", scopes: ["transactions:read", "transactions:create"] },
+  { label: "Vendors", scopes: ["vendors:read", "vendors:create", "vendors:update"] },
+  { label: "Bills", scopes: ["bills:read", "bills:create", "bills:update"] },
+  { label: "Planning", scopes: ["budgets:read", "budgets:write", "assets:read", "loans:read"] },
 ];
 
 const TABS = ["Overview", "API Keys", "Documentation", "Webhooks", "API Logs"] as const;
@@ -34,12 +38,7 @@ export function DeveloperPortal({ projectId }: { projectId: string }) {
       {tab === "Overview" && <Overview origin={origin} onDocs={() => setTab("Documentation")} onKeys={() => setTab("API Keys")} />}
       {tab === "API Keys" && <Keys projectId={projectId} token={token} onToken={setToken} onDocs={() => setTab("Documentation")} />}
       {tab === "Documentation" && <Docs origin={origin} token={token} />}
-      {tab === "Webhooks" && (
-        <section className="rounded-xl bg-card p-4">
-          <h2 className="text-sm font-medium">Webhooks</h2>
-          <p className="mt-2 text-sm text-muted-foreground">Webhook delivery is not yet available. Events are not sent, and there is nothing to sign.</p>
-        </section>
-      )}
+      {tab === "Webhooks" && <WebhookPanel projectId={projectId} />}
       {tab === "API Logs" && <Logs projectId={projectId} />}
     </div>
   );
@@ -207,6 +206,41 @@ function Logs({ projectId }: { projectId: string }) {
             <p className="text-xs tabular">{log.status} · {log.duration_ms}ms</p>
           </div>
           <p className="text-xs text-muted-foreground">{log.name || "Key"} · {log.environment} · {log.error_code || "ok"} · {log.request_id.slice(0, 8)}</p>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function WebhookPanel({ projectId }: { projectId: string }) {
+  const [url, setUrl] = useState("");
+  const [secret, setSecret] = useState("");
+  const desk = useQuery({ queryKey: ["webhooks", projectId], queryFn: () => webhookDesk({ data: { projectId } }) });
+  return (
+    <div className="space-y-3">
+      <section className="rounded-xl bg-card p-4">
+        <h2 className="text-sm font-medium">Webhooks</h2>
+        <p className="mt-2 text-sm text-muted-foreground">Kharcha POSTs JSON to an https URL. The signature is HMAC-SHA256 of timestamp + a dot + the raw body. Header X-Kharcha-Signature is sha256= and the hex digest. Retries wait 1, 5, 30, then 120 minutes, then stop. The event id stays the same. The secret is shown once and is not written to the audit log.</p>
+        <form className="mt-3 grid gap-2" onSubmit={async (event) => {
+          event.preventDefault();
+          const saved = await saveWebhookEndpoint({ data: { projectId, url, events: ["invoice.issued", "invoice.paid", "bill.created", "bill.paid", "payment.created"] } });
+          setSecret(saved?.secret || "");
+          setUrl("");
+          await desk.refetch();
+        }}>
+          <Input className="h-11" placeholder="https://example.com/hooks" value={url} onChange={(event) => setUrl(event.target.value)} required />
+          <Button type="submit" className="h-11">Add endpoint</Button>
+        </form>
+        {secret && <p className="mt-2 break-all font-mono text-xs">Signing secret, shown once: {secret}</p>}
+      </section>
+      {(desk.data?.endpoints ?? []).map((endpoint) => (
+        <article key={endpoint.id} className="rounded-xl bg-card p-4 text-sm">
+          <p className="break-all">{endpoint.url}</p>
+          <p className="text-muted-foreground">{endpoint.status} · {endpoint.events}</p>
+          <div className="mt-2 flex gap-2">
+            <Button type="button" variant="secondary" className="h-9" onClick={async () => { const next = await rotateWebhookSecret({ data: { projectId, id: endpoint.id } }); setSecret(next?.secret || ""); await desk.refetch(); }}>Rotate secret</Button>
+            <Button type="button" variant="ghost" className="h-9" onClick={async () => { await disableWebhook({ data: { projectId, id: endpoint.id } }); await desk.refetch(); }}>Disable</Button>
+          </div>
         </article>
       ))}
     </div>

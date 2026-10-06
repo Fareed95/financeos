@@ -10,6 +10,8 @@ import {
   type PostedLine,
 } from "@/lib/ledger";
 import { fromCents, parseMoney, toCents } from "@/lib/money";
+import { assertOpeningAllowed, can, periodRange, planStartingMoney, type BizPermission } from "@/lib/biz-access";
+import { previousWindow, recentMonthRanges, runwayFrom, whyProfitChanged } from "@/lib/ops";
 import { ensureUser } from "@/lib/server/ensure";
 import { publicError } from "@/lib/utils";
 
@@ -28,6 +30,16 @@ const SCOPES = [
   "transactions:read",
   "transactions:create",
   "accounting:read",
+  "vendors:read",
+  "vendors:create",
+  "vendors:update",
+  "bills:read",
+  "bills:create",
+  "bills:update",
+  "budgets:read",
+  "budgets:write",
+  "assets:read",
+  "loans:read",
 ] as const;
 
 async function sha256(value: string) {
@@ -45,7 +57,7 @@ async function ownerProject(sql: Sql, userId: string, projectId: string) {
   return project;
 }
 
-async function audit(sql: Sql, businessId: string, actorId: string, action: string, entity: string, entityId: string) {
+export async function audit(sql: Sql, businessId: string, actorId: string, action: string, entity: string, entityId: string) {
   await sql`
     insert into biz_audit (id, business_id, actor_id, action, entity, entity_id)
     values (${crypto.randomUUID()}, ${businessId}, ${actorId}, ${action}, ${entity}, ${entityId})
@@ -90,6 +102,26 @@ export async function ensureBusiness(sql: Sql, userId: string, projectId: string
     }
   }
   return businessId;
+}
+
+export async function requireBusiness(sql: Sql, userId: string, projectId: string, permission: BizPermission) {
+  const rows = await sql<{ id: string; name: string; project_type: string; user_id: string }>`
+    select id, name, project_type, user_id from projects where id = ${projectId}
+  `;
+  const project = rows[0];
+  if (!project || project.project_type !== "business") throw new Error("Project not found");
+  if (project.user_id === userId) {
+    return { businessId: await ensureBusiness(sql, userId, projectId), role: "owner" as const };
+  }
+  const biz = await sql<{ id: string }>`select id from businesses where project_id = ${projectId}`;
+  if (!biz[0]) throw new Error("Project not found");
+  const members = await sql<{ role: string }>`
+    select role from biz_members
+    where business_id = ${biz[0].id} and user_id = ${userId} and status = 'active'
+  `;
+  const role = members[0]?.role;
+  if (!role || !can(role, permission)) throw new Error("You don't have access to do that.");
+  return { businessId: biz[0].id, role };
 }
 
 async function accountIds(sql: Sql, businessId: string) {
@@ -241,18 +273,37 @@ export async function recordExpense(
   return { id };
 }
 
-export async function recordCapital(sql: Sql, actorId: string, businessId: string, input: { amount: string; date: string }) {
+export async function recordCapital(
+  sql: Sql,
+  actorId: string,
+  businessId: string,
+  input: { amount: string; date: string; place?: string; origin?: string; kind?: "opening" | "contribution" },
+) {
+  const kind = input.kind === "contribution" ? "contribution" : "opening";
+  const existing = await sql<{ id: string }>`
+    select id from journal_entries
+    where business_id = ${businessId} and source in ('capital', 'opening') and status = 'posted'
+    limit 1
+  `;
+  if (kind === "opening") assertOpeningAllowed(Boolean(existing[0]));
   const amount = toCents(parseMoney(input.amount));
-  if (amount <= 0n) throw new Error("Amount must be greater than zero");
+  const lines = planStartingMoney({
+    amount,
+    place: input.place || "bank",
+    origin: input.origin || "founder",
+  });
   const id = crypto.randomUUID();
   await postJournal(sql, actorId, businessId, {
     date: input.date,
-    memo: "Owner capital",
-    source: "capital",
+    memo: kind === "opening" ? "Starting balance" : "Money added to the business",
+    source: kind === "opening" ? "opening" : "contribution",
     sourceId: id,
-    lines: [moneyLine("1010", amount, 0n), moneyLine("3000", 0n, amount)],
+    lines,
   });
-  await audit(sql, businessId, actorId, "capital.posted", "journal", id);
+  if (kind === "opening") {
+    await sql`update businesses set setup_completed_at = coalesce(setup_completed_at, now()) where id = ${businessId}`;
+  }
+  await audit(sql, businessId, actorId, kind === "opening" ? "opening.posted" : "contribution.posted", "journal", id);
   return { id };
 }
 
@@ -317,7 +368,7 @@ function fiscalRange(today: string, startMonth = 4) {
   };
 }
 
-async function loadLines(sql: Sql, businessId: string): Promise<PostedLine[]> {
+export async function loadLines(sql: Sql, businessId: string): Promise<PostedLine[]> {
   const rows = await sql<{ entry_id: string; date: string; code: string; debit: string; credit: string }>`
     select e.id as entry_id, e.entry_date::text as date, a.code, l.debit::text as debit, l.credit::text as credit
     from journal_lines l
@@ -373,12 +424,14 @@ function present(books: ReturnType<typeof buildStatements>) {
 
 export const getBusiness = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((data: { projectId: string; today: string }) => data)
+  .validator((data: { projectId: string; today: string; period?: string }) => data)
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
-      const businessId = await ensureBusiness(sql, context.userId, data.projectId);
-      const range = fiscalRange(data.today || new Date().toISOString().slice(0, 10));
+      const access = await requireBusiness(sql, context.userId, data.projectId, "view_finance");
+      const businessId = access.businessId;
+      const today = data.today || new Date().toISOString().slice(0, 10);
+      const range = periodRange(today, data.period || "month");
       const lines = await loadLines(sql, businessId);
       const invoices = await sql<{
         id: string;
@@ -389,9 +442,15 @@ export const getBusiness = createServerFn({ method: "POST" })
         total: string;
         amount_paid: string;
         status: string;
+        taxable_total: string;
+        cgst_total: string;
+        sgst_total: string;
+        igst_total: string;
       }>`
         select id, number, customer_name, issue_date::text as issue_date, due_date::text as due_date,
-               total::text as total, amount_paid::text as amount_paid, status
+               total::text as total, amount_paid::text as amount_paid, status,
+               taxable_total::text as taxable_total, cgst_total::text as cgst_total,
+               sgst_total::text as sgst_total, igst_total::text as igst_total
         from biz_invoices where business_id = ${businessId} order by issue_date desc, number desc
       `;
       const expenses = await sql<{ id: string; account_code: string; amount: string; memo: string | null; paid: boolean; spent_on: string }>`
@@ -402,11 +461,66 @@ export const getBusiness = createServerFn({ method: "POST" })
         select id, name, prefix, environment, scopes, revoked_at::text as revoked_at
         from biz_api_keys where business_id = ${businessId} order by created_at desc
       `;
-      const holders = ownership(await holdersOf(sql, businessId));
+      const holders = can(access.role, "view_equity") ? ownership(await holdersOf(sql, businessId)) : [];
+      const opening = await sql<{ id: string }>`
+        select id from journal_entries
+        where business_id = ${businessId} and source in ('capital', 'opening') and status = 'posted'
+        limit 1
+      `;
+      const profile = await sql<{ setup_completed_at: string | null; business_kind: string | null; gst_registered: string | null }>`
+        select setup_completed_at::text as setup_completed_at, business_kind, gst_registered
+        from businesses where id = ${businessId}
+      `;
+      const cashCodes = new Set(["1000", "1010", "1020"]);
+      let cash = 0n;
+      let receivable = 0n;
+      let payable = 0n;
+      let gstPayable = 0n;
+      for (const line of lines) {
+        if (cashCodes.has(line.code)) cash += line.debit - line.credit;
+        if (line.code === "1100") receivable += line.debit - line.credit;
+        if (line.code === "2000") payable += line.credit - line.debit;
+        if (line.code === "2210" || line.code === "2220" || line.code === "2230") gstPayable += line.credit - line.debit;
+      }
+      const funded = await sql<{ amount: string }>`
+        select coalesce(sum(l.credit - l.debit), 0)::text as amount
+        from journal_lines l
+        join journal_entries e on e.id = l.entry_id
+        join ledger_accounts a on a.id = l.account_id
+        where e.business_id = ${businessId} and e.status = 'posted' and e.environment = 'live'
+          and e.source in ('capital', 'opening', 'contribution')
+          and a.code in ('3000', '3100', '3200')
+      `;
+      const showKeys = can(access.role, "manage_api_keys");
+      const currentBooks = buildStatements(lines, range.from, range.to);
+      const previousRange = previousWindow(range.from, range.to);
+      const previousBooks = buildStatements(lines, previousRange.from, previousRange.to);
+      const expenseParts = (books: ReturnType<typeof buildStatements>) =>
+        [
+          ...books.cogs,
+          ...books.opex,
+          { code: "5700", name: "Depreciation", amount: books.depreciation },
+          { code: "5800", name: "Interest", amount: books.interest },
+          { code: "5900", name: "Tax", amount: books.tax },
+        ].filter((row) => row.amount !== 0n);
+      const change = whyProfitChanged(
+        { revenue: previousBooks.totalRevenue, expenses: expenseParts(previousBooks), profit: previousBooks.netProfit },
+        { revenue: currentBooks.totalRevenue, expenses: expenseParts(currentBooks), profit: currentBooks.netProfit },
+      );
+      const runway = runwayFrom(cash, recentMonthRanges(today, 3).map((window) => buildStatements(lines, window.from, window.to).operating));
       return {
         businessId,
+        role: access.role,
         range,
-        statements: present(buildStatements(lines, range.from, range.to)),
+        openingDone: Boolean(opening[0]),
+        setupDone: Boolean(opening[0] || profile[0]?.setup_completed_at),
+        businessKind: profile[0]?.business_kind ?? null,
+        cash: fromCents(cash),
+        receivable: fromCents(receivable),
+        payable: fromCents(payable),
+        gstPayable: fromCents(gstPayable),
+        ownerFunding: fromCents(toCents(funded[0]?.amount || "0")),
+        statements: present(currentBooks),
         expenseAccounts: CHART.filter((account) => account.type === "expense").map((account) => ({
           code: account.code,
           name: account.name,
@@ -418,25 +532,31 @@ export const getBusiness = createServerFn({ method: "POST" })
         })),
         expenses: expenses.map((row) => ({ ...row, spentOn: row.spent_on.slice(0, 10) })),
         holders: holders.map((row) => ({ name: row.name, shares: row.shares.toString(), bps: row.bps.toString() })),
-        keys: keys.map((row) => ({ ...row, revoked: Boolean(row.revoked_at) })),
+        keys: showKeys ? keys.map((row) => ({ ...row, revoked: Boolean(row.revoked_at) })) : [],
+        change: {
+          explained: change.explained,
+          delta: fromCents(change.delta),
+          parts: change.parts.map((part) => ({ label: part.label, amount: fromCents(part.impact) })),
+        },
+        runway,
       };
     } catch (err) {
       publicError(err, "Couldn't load this business.");
     }
   });
 
-async function withBusiness(userId: string, projectId: string) {
+async function withBusiness(userId: string, projectId: string, permission: BizPermission) {
   const { sql } = await ensureUser(userId);
-  const businessId = await ensureBusiness(sql, userId, projectId);
-  return { sql, businessId };
+  const access = await requireBusiness(sql, userId, projectId, permission);
+  return { sql, businessId: access.businessId, role: access.role };
 }
 
 export const postBusinessCapital = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((data: { projectId: string; amount: string; date: string }) => data)
+  .validator((data: { projectId: string; amount: string; date: string; place?: string; origin?: string; kind?: "opening" | "contribution" }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withBusiness(context.userId, data.projectId);
+      const { sql, businessId } = await withBusiness(context.userId, data.projectId, "create_records");
       return await recordCapital(sql, context.userId, businessId, data);
     } catch (err) {
       publicError(err, "Couldn't record that capital.");
@@ -448,7 +568,7 @@ export const postBusinessInvoice = createServerFn({ method: "POST" })
   .validator((data: { projectId: string; customer: string; subtotal: string; discount?: string; tax?: string; date: string; due?: string | null }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withBusiness(context.userId, data.projectId);
+      const { sql, businessId } = await withBusiness(context.userId, data.projectId, "create_records");
       return await issueInvoice(sql, context.userId, businessId, data);
     } catch (err) {
       publicError(err, "Couldn't issue that invoice.");
@@ -460,7 +580,7 @@ export const postBusinessPayment = createServerFn({ method: "POST" })
   .validator((data: { projectId: string; invoiceId: string; amount: string; date: string }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withBusiness(context.userId, data.projectId);
+      const { sql, businessId } = await withBusiness(context.userId, data.projectId, "create_records");
       return await collectInvoice(sql, context.userId, businessId, data);
     } catch (err) {
       publicError(err, "Couldn't record that payment.");
@@ -472,7 +592,7 @@ export const postBusinessExpense = createServerFn({ method: "POST" })
   .validator((data: { projectId: string; code: string; amount: string; date: string; memo?: string | null; paid: boolean }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withBusiness(context.userId, data.projectId);
+      const { sql, businessId } = await withBusiness(context.userId, data.projectId, "create_records");
       return await recordExpense(sql, context.userId, businessId, data);
     } catch (err) {
       publicError(err, "Couldn't record that expense.");
@@ -484,7 +604,7 @@ export const postBusinessShares = createServerFn({ method: "POST" })
   .validator((data: { projectId: string; holder: string; shares: number; amount?: string | null; date: string }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withBusiness(context.userId, data.projectId);
+      const { sql, businessId } = await withBusiness(context.userId, data.projectId, "manage_equity");
       return await issueShares(sql, context.userId, businessId, data);
     } catch (err) {
       publicError(err, "Couldn't issue those shares.");
@@ -501,7 +621,7 @@ export const createBusinessApiKey = createServerFn({ method: "POST" })
       if (data.environment !== "test" && data.environment !== "live") throw new Error("Choose test or live");
       const scopes = [...new Set(data.scopes.filter((scope) => (SCOPES as readonly string[]).includes(scope)))];
       if (scopes.length === 0) throw new Error("Pick at least one permission");
-      const { sql, businessId } = await withBusiness(context.userId, data.projectId);
+      const { sql, businessId } = await withBusiness(context.userId, data.projectId, "manage_api_keys");
       const raw = `kh_${data.environment}_${crypto.randomUUID().replace(/-/g, "")}`;
       const id = crypto.randomUUID();
       const days = data.expiresInDays;
@@ -525,7 +645,7 @@ export const revokeBusinessApiKey = createServerFn({ method: "POST" })
   .validator((data: { projectId: string; keyId: string }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withBusiness(context.userId, data.projectId);
+      const { sql, businessId } = await withBusiness(context.userId, data.projectId, "manage_api_keys");
       await sql`
         update biz_api_keys set revoked_at = now()
         where id = ${data.keyId} and business_id = ${businessId} and revoked_at is null
@@ -542,7 +662,7 @@ export const rotateBusinessApiKey = createServerFn({ method: "POST" })
   .validator((data: { projectId: string; keyId: string }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withBusiness(context.userId, data.projectId);
+      const { sql, businessId } = await withBusiness(context.userId, data.projectId, "manage_api_keys");
       const rows = await sql<{ name: string; environment: string; scopes: string }>`
         select name, environment, scopes from biz_api_keys
         where id = ${data.keyId} and business_id = ${businessId} and revoked_at is null
@@ -571,7 +691,7 @@ export const listBusinessApiLogs = createServerFn({ method: "POST" })
   .validator((data: { projectId: string }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withBusiness(context.userId, data.projectId);
+      const { sql, businessId } = await withBusiness(context.userId, data.projectId, "manage_api_keys");
       const logs = await sql<{
         request_id: string;
         method: string;

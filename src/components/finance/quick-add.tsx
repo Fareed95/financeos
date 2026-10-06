@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { Plus } from "lucide-react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { TxnForm, type TxnFormDefaults } from "@/components/finance/txn-form";
@@ -60,6 +60,15 @@ export function QuickAddSheet() {
 
 export function QuickAddFab({ className }: { className?: string }) {
   const { openAdd } = useQuickAdd();
+  const [hidden, setHidden] = useState(false);
+  useEffect(() => {
+    const read = () => setHidden(document.documentElement.dataset.hideQuickAdd === "1");
+    read();
+    const watcher = new MutationObserver(read);
+    watcher.observe(document.documentElement, { attributes: true });
+    return () => watcher.disconnect();
+  }, []);
+  if (hidden) return null;
   return (
     <button
       type="button"

@@ -7,6 +7,7 @@ import { fromCents, parseMoney, subMoney, toCents } from "@/lib/money";
 import { publicError } from "@/lib/utils";
 import { planOpenParts, saveSplitLinks, type ShareLink } from "@/lib/server/split-links";
 import { notifyProjectActivity } from "@/lib/server/notices";
+import { acceptBizInvite, previewBizInvite } from "@/lib/server/biz-team";
 import {
   allocateSplits,
   applyExpense,
@@ -355,6 +356,8 @@ export const previewInvite = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
+      const business = await previewBizInvite(sql, context.userId, data.token);
+      if (business) return business;
       const rows = await sql<{
         id: string;
         project_id: string;
@@ -381,6 +384,7 @@ export const previewInvite = createServerFn({ method: "POST" })
       else if (invite.accepted_at) state = "used";
       else if (new Date(invite.expires_at).getTime() < Date.now()) state = "expired";
       return {
+        kind: "project" as const,
         inviteId: invite.id,
         projectId: invite.project_id,
         projectName: invite.project_name,
@@ -398,6 +402,8 @@ export const acceptInvite = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
+      const business = await acceptBizInvite(sql, context.userId, data.token);
+      if (business) return business;
       const rows = await sql<{
         id: string;
         project_id: string;

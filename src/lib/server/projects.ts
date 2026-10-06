@@ -22,6 +22,11 @@ export const listProjects = createServerFn({ method: "POST" })
               select 1 from project_members m
               where m.project_id = p.id and m.user_id = $1 and m.status = 'active'
             )
+            or exists (
+              select 1 from biz_members bm
+              join businesses b on b.id = bm.business_id
+              where b.project_id = p.id and bm.user_id = $1 and bm.status = 'active'
+            )
          order by case p.status when 'active' then 0 when 'planned' then 1 when 'completed' then 2 else 3 end, p.created_at desc`,
         [context.userId],
       );
@@ -127,6 +132,11 @@ export const getProjectDetail = createServerFn({ method: "POST" })
            p.user_id = $2 or exists (
              select 1 from project_members m
              where m.project_id = p.id and m.user_id = $2 and m.status = 'active'
+           )
+           or exists (
+             select 1 from biz_members bm
+             join businesses b on b.id = bm.business_id
+             where b.project_id = p.id and bm.user_id = $2 and bm.status = 'active'
            )
          )`,
         [data.id, context.userId],

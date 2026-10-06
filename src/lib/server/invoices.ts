@@ -14,7 +14,9 @@ import {
 import { assertBalanced } from "@/lib/ledger";
 import { fromCents, parseMoney, toCents } from "@/lib/money";
 import { ensureUser } from "@/lib/server/ensure";
-import { ensureBusiness, postJournal } from "@/lib/server/business";
+import { postJournal, requireBusiness } from "@/lib/server/business";
+import { emitBusinessEvent } from "@/lib/server/webhooks";
+import type { BizPermission } from "@/lib/biz-access";
 import { publicError } from "@/lib/utils";
 
 export type Books = "live" | "test";
@@ -341,6 +343,11 @@ export async function issueDraft(sql: Sql, actorId: string, businessId: string, 
     where id = ${invoice.id}
   `;
   await audit(sql, businessId, actorId, "invoice.issued", invoice.id);
+  try {
+    await emitBusinessEvent(sql, businessId, environment, "invoice.issued", { id: invoice.id, number });
+  } catch {
+    /* delivery bookkeeping must not undo the invoice */
+  }
   return { id: invoice.id, number, total: fromCents(computed.total) };
 }
 
@@ -386,6 +393,12 @@ export async function recordInvoicePayment(
     update biz_invoices set amount_paid = ${fromCents(nextPaid)}::numeric, status = ${status} where id = ${invoice.id}
   `;
   await audit(sql, businessId, actorId, "invoice.payment_recorded", paymentId);
+  try {
+    await emitBusinessEvent(sql, businessId, environment, status === "paid" ? "invoice.paid" : "invoice.partially_paid", { id: invoice.id });
+    await emitBusinessEvent(sql, businessId, environment, "payment.created", { id: paymentId, invoiceId: invoice.id });
+  } catch {
+    /* a failed endpoint does not undo the cash receipt */
+  }
   return { id: paymentId, status, balance: fromCents(stillOpen) };
 }
 
@@ -513,10 +526,10 @@ export async function invoiceDetail(sql: Sql, businessId: string, invoiceId: str
   };
 }
 
-async function withLive(userId: string, projectId: string) {
+async function withLive(userId: string, projectId: string, permission: BizPermission) {
   const { sql } = await ensureUser(userId);
-  const businessId = await ensureBusiness(sql, userId, projectId);
-  return { sql, businessId };
+  const access = await requireBusiness(sql, userId, projectId, permission);
+  return { sql, businessId: access.businessId };
 }
 
 export const getInvoiceDesk = createServerFn({ method: "POST" })
@@ -524,7 +537,7 @@ export const getInvoiceDesk = createServerFn({ method: "POST" })
   .validator((data: { projectId: string; today: string }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withLive(context.userId, data.projectId);
+      const { sql, businessId } = await withLive(context.userId, data.projectId, "view_finance");
       const seller = await sellerRow(sql, businessId);
       const customers = await sql<{ id: string; name: string; company: string | null; gstin: string | null; state_code: string | null; email: string | null }>`
         select id, name, company, gstin, state_code, email from biz_customers
@@ -581,7 +594,7 @@ export const saveBusinessCustomer = createServerFn({ method: "POST" })
   .validator((data: { projectId: string; name: string; company?: string; email?: string; gstin?: string; stateCode?: string; billingAddress?: string }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withLive(context.userId, data.projectId);
+      const { sql, businessId } = await withLive(context.userId, data.projectId, "create_records");
       return await saveCustomer(sql, businessId, "live", data);
     } catch (err) {
       publicError(err, "Couldn't save that customer.");
@@ -593,7 +606,7 @@ export const saveSellerProfile = createServerFn({ method: "POST" })
   .validator((data: { projectId: string; legalName?: string; stateCode?: string; gstin?: string; pan?: string; email?: string; phone?: string; address1?: string; city?: string; prefix?: string; dueDays?: number; terms?: string; upi?: string }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withLive(context.userId, data.projectId);
+      const { sql, businessId } = await withLive(context.userId, data.projectId, "create_records");
       const prefix = (data.prefix || "INV").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8) || "INV";
       const due = Number.isInteger(data.dueDays) && (data.dueDays as number) >= 0 && (data.dueDays as number) <= 365 ? data.dueDays : 30;
       await sql`
@@ -631,7 +644,7 @@ export const saveBusinessDraft = createServerFn({ method: "POST" })
   }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withLive(context.userId, data.projectId);
+      const { sql, businessId } = await withLive(context.userId, data.projectId, "create_records");
       return await saveDraftInvoice(sql, context.userId, businessId, "live", {
         ...data,
         items: data.items.map((item) => ({ ...item, rate: toCents(parseMoney(item.rate)) })),
@@ -646,7 +659,7 @@ export const issueBusinessInvoice = createServerFn({ method: "POST" })
   .validator((data: { projectId: string; invoiceId: string }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withLive(context.userId, data.projectId);
+      const { sql, businessId } = await withLive(context.userId, data.projectId, "create_records");
       return await issueDraft(sql, context.userId, businessId, "live", data.invoiceId);
     } catch (err) {
       publicError(err, "Couldn't issue that invoice.");
@@ -658,7 +671,7 @@ export const payBusinessInvoice = createServerFn({ method: "POST" })
   .validator((data: { projectId: string; invoiceId: string; amount: string; date: string; method: string; accountCode: string; reference?: string }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withLive(context.userId, data.projectId);
+      const { sql, businessId } = await withLive(context.userId, data.projectId, "create_records");
       return await recordInvoicePayment(sql, context.userId, businessId, "live", data);
     } catch (err) {
       publicError(err, "Couldn't record that payment.");
@@ -670,7 +683,7 @@ export const creditBusinessInvoice = createServerFn({ method: "POST" })
   .validator((data: { projectId: string; invoiceId: string; amount: string; date: string; reason?: string }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withLive(context.userId, data.projectId);
+      const { sql, businessId } = await withLive(context.userId, data.projectId, "create_records");
       return await createCreditNote(sql, context.userId, businessId, "live", data);
     } catch (err) {
       publicError(err, "Couldn't create that credit note.");
@@ -690,7 +703,7 @@ export const downloadInvoicePdf = createServerFn({ method: "POST" })
   .validator((data: { projectId: string; invoiceId: string }) => data)
   .handler(async ({ context, data }) => {
     try {
-      const { sql, businessId } = await withLive(context.userId, data.projectId);
+      const { sql, businessId } = await withLive(context.userId, data.projectId, "view_finance");
       const pdf = await invoicePdfBase64(sql, businessId, data.invoiceId, "live");
       return { pdf };
     } catch (err) {

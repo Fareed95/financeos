@@ -65,9 +65,18 @@ function InvitePage() {
   return (
     <main className="grid min-h-dvh place-items-center px-6">
       <div className="w-full max-w-sm space-y-4 text-center">
-        <p className="text-xs tracking-wide text-muted-foreground uppercase">Invited to this project</p>
+        <p className="text-xs tracking-wide text-muted-foreground uppercase">
+          {invite.kind === "business" ? "You've been invited to join" : "Invited to this project"}
+        </p>
         <p className="text-sm text-muted-foreground">{invite.invitedBy} invited you</p>
         <h1 className="font-display text-3xl">{invite.projectName}</h1>
+        {invite.kind === "business" && "role" in invite && (
+          <div className="space-y-1 text-sm text-muted-foreground">
+            <p className="capitalize">Role · {String(invite.role)}</p>
+            <p>{"summary" in invite ? String(invite.summary) : ""}</p>
+            <p>This is access to the business. It does not split personal expenses.</p>
+          </div>
+        )}
         {invite.state === "open" && (
           <div className="flex gap-2">
             <Button
@@ -85,7 +94,7 @@ function InvitePage() {
                 }
               }}
             >
-              Accept
+              {invite.kind === "business" ? "Join business" : "Accept"}
             </Button>
             <Button variant="secondary" className="h-11 flex-1" onClick={() => void navigate({ to: "/" })}>
               Decline
