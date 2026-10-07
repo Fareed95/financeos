@@ -3,7 +3,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { INDIA_STATES } from "@/lib/gst";
 import { formatMoney, isZero } from "@/lib/money";
 import {
@@ -55,23 +54,31 @@ export function InvoiceDesk({ projectId, currency, startSetup = false }: { proje
           <p className="mt-1 text-sm text-muted-foreground">Issue an invoice when someone owes you. A draft does not change the books.</p>
         </div>
       )}
-      {data.invoices.map((invoice) => (
-        <article key={invoice.id} className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
-          <div className="flex items-baseline justify-between gap-3">
-            <h3 className="font-medium">{invoice.number}</h3>
-            <p className="text-xs capitalize text-muted-foreground">{invoice.displayStatus.replaceAll("_", " ")}</p>
+      {data.invoices.map((invoice) => {
+        const tax = [invoice.cgst, invoice.sgst, invoice.igst].some((value) => !isZero(value));
+        const what = invoice.lines.map((line) => line.description).filter(Boolean).join(", ");
+        return (
+        <article key={invoice.id} className="rounded-xl bg-card px-4 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate font-medium">{invoice.customerName}</p>
+              <p className="truncate text-sm text-muted-foreground">{what || invoice.number}</p>
+            </div>
+            <div className="shrink-0 text-right">
+              <p className="font-medium tabular">{formatMoney(invoice.total, currency, { compact: true })}</p>
+              <p className="text-xs capitalize text-muted-foreground">{invoice.displayStatus.replaceAll("_", " ")}</p>
+            </div>
           </div>
-          <p className="text-sm text-muted-foreground">{invoice.customerName}</p>
-          <p className="mt-1 tabular">{formatMoney(invoice.total, currency)}</p>
-          <p className="text-xs text-muted-foreground">
-            CGST {formatMoney(invoice.cgst, currency)} · SGST {formatMoney(invoice.sgst, currency)} · IGST {formatMoney(invoice.igst, currency)} · Due {formatMoney(invoice.balance, currency)}
-          </p>
-          {invoice.lines[0] && <p className="mt-1 text-sm">{invoice.lines.map((line) => line.description).join(", ")}</p>}
-          <div className="mt-3 flex flex-wrap gap-2">
+          {tax && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              CGST {formatMoney(invoice.cgst, currency, { compact: true })} · SGST {formatMoney(invoice.sgst, currency, { compact: true })} · IGST {formatMoney(invoice.igst, currency, { compact: true })}
+            </p>
+          )}
+          <div className="mt-3 flex gap-2">
             {invoice.status === "draft" && (
               <Button
                 type="button"
-                className="h-11"
+                className="h-10"
                 onClick={async () => {
                   if (!window.confirm("Issue this invoice? The number is locked and the books are posted.")) return;
                   try {
@@ -110,7 +117,8 @@ export function InvoiceDesk({ projectId, currency, startSetup = false }: { proje
             <PaymentForm projectId={projectId} invoiceId={invoice.id} today={today} balance={invoice.balance} onSaved={reload} />
           )}
         </article>
-      ))}
+        );
+      })}
       {panel === "draft" && (
         <DraftForm
           projectId={projectId}
@@ -176,7 +184,7 @@ function SellerForm({
   const [gstin, setGstin] = useState(seller.gstin || "");
   return (
     <form
-      className="grid gap-3 rounded-xl bg-card p-4"
+      className="overflow-hidden rounded-xl bg-card"
       onSubmit={async (event) => {
         event.preventDefault();
         try {
@@ -188,18 +196,26 @@ function SellerForm({
         }
       }}
     >
-      <p className="text-sm font-medium">Seller</p>
-      <p className="text-sm text-muted-foreground">State decides CGST+SGST or IGST. This is not a GST filing.</p>
-      <Label>State</Label>
-      <select className="h-11 rounded-md bg-secondary px-3" value={stateCode} onChange={(event) => setStateCode(event.target.value)}>
-        {INDIA_STATES.map((state) => (
-          <option key={state.code} value={state.code}>{state.name}</option>
-        ))}
-      </select>
-      <Label htmlFor="gstin">GSTIN</Label>
-      <Input id="gstin" value={gstin} onChange={(event) => setGstin(event.target.value)} />
-      <Button type="submit" variant="secondary">Save seller</Button>
-      <button type="button" className="h-11 text-sm text-muted-foreground" onClick={onClose}>Cancel</button>
+      <div className="flex items-center justify-between px-4 pt-4">
+        <p className="font-medium">Your business</p>
+        <button type="button" className="text-sm text-muted-foreground" onClick={onClose}>Close</button>
+      </div>
+      <p className="px-4 pb-3 text-xs text-muted-foreground">State picks CGST+SGST or IGST. This is not a GST return.</p>
+      <label className="block border-t border-border/60 px-4 py-3">
+        <span className="text-[11px] text-muted-foreground">State</span>
+        <select className="mt-1 h-11 w-full bg-transparent text-base outline-none" value={stateCode} onChange={(event) => setStateCode(event.target.value)}>
+          {INDIA_STATES.map((state) => (
+            <option key={state.code} value={state.code}>{state.name}</option>
+          ))}
+        </select>
+      </label>
+      <label className="block border-t border-border/60 px-4 py-3">
+        <span className="text-[11px] text-muted-foreground">GSTIN, if you have one</span>
+        <Input id="gstin" value={gstin} onChange={(event) => setGstin(event.target.value)} placeholder="Optional" className="mt-1 h-11 bg-transparent px-0 shadow-none focus-visible:shadow-none" />
+      </label>
+      <div className="border-t border-border/60 p-3">
+        <Button type="submit" className="h-11 w-full">Save</Button>
+      </div>
     </form>
   );
 }
@@ -209,7 +225,7 @@ function CustomerForm({ projectId, onSaved, onClose }: { projectId: string; onSa
   const [stateCode, setStateCode] = useState("MH");
   return (
     <form
-      className="grid gap-3 rounded-xl bg-card p-4"
+      className="overflow-hidden rounded-xl bg-card"
       onSubmit={async (event) => {
         event.preventDefault();
         try {
@@ -222,17 +238,25 @@ function CustomerForm({ projectId, onSaved, onClose }: { projectId: string; onSa
         }
       }}
     >
-      <p className="text-sm font-medium">Customer</p>
-      <Label htmlFor="cname">Name</Label>
-      <Input id="cname" value={name} onChange={(event) => setName(event.target.value)} />
-      <Label>State</Label>
-      <select className="h-11 rounded-md bg-secondary px-3" value={stateCode} onChange={(event) => setStateCode(event.target.value)}>
-        {INDIA_STATES.map((state) => (
-          <option key={state.code} value={state.code}>{state.name}</option>
-        ))}
-      </select>
-      <Button type="submit" variant="secondary">Add customer</Button>
-      <button type="button" className="h-11 text-sm text-muted-foreground" onClick={onClose}>Cancel</button>
+      <div className="flex items-center justify-between px-4 pt-4">
+        <p className="font-medium">Customer</p>
+        <button type="button" className="text-sm text-muted-foreground" onClick={onClose}>Close</button>
+      </div>
+      <label className="mt-3 block border-t border-border/60 px-4 py-3">
+        <span className="text-[11px] text-muted-foreground">Name</span>
+        <Input id="cname" value={name} onChange={(event) => setName(event.target.value)} placeholder="Who you bill" className="mt-1 h-11 bg-transparent px-0 shadow-none focus-visible:shadow-none" />
+      </label>
+      <label className="block border-t border-border/60 px-4 py-3">
+        <span className="text-[11px] text-muted-foreground">State</span>
+        <select className="mt-1 h-11 w-full bg-transparent text-base outline-none" value={stateCode} onChange={(event) => setStateCode(event.target.value)}>
+          {INDIA_STATES.map((state) => (
+            <option key={state.code} value={state.code}>{state.name}</option>
+          ))}
+        </select>
+      </label>
+      <div className="border-t border-border/60 p-3">
+        <Button type="submit" className="h-11 w-full">Save customer</Button>
+      </div>
     </form>
   );
 }
@@ -261,7 +285,7 @@ function DraftForm({
   return (
     <form
       id="new-invoice"
-      className="grid gap-3 rounded-xl bg-card p-4"
+      className="overflow-hidden rounded-xl bg-card"
       onSubmit={async (event) => {
         event.preventDefault();
         try {
@@ -289,45 +313,62 @@ function DraftForm({
         }
       }}
     >
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-medium">New invoice</p>
-        <button type="button" className="text-sm text-muted-foreground" onClick={onClose}>Cancel</button>
+      <div className="flex items-center justify-between px-4 pt-4">
+        <p className="font-medium">New invoice</p>
+        <button type="button" className="text-sm text-muted-foreground" onClick={onClose}>Close</button>
       </div>
-      <p className="text-sm text-muted-foreground">Nothing hits the books until you issue it.</p>
-      <Label htmlFor="desc">What is it</Label>
-      <Input id="desc" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Design, software, consulting" />
-      <Label htmlFor="rate">Amount</Label>
-      <Input id="rate" inputMode="decimal" value={rate} onChange={(event) => setRate(event.target.value)} placeholder="0" />
-      {customers.length > 0 ? (
-        <>
-          <Label>Customer</Label>
-          <select className="h-11 rounded-md bg-secondary px-3" value={customerId} onChange={(event) => setCustomerId(event.target.value)}>
+      <p className="px-4 pb-3 text-xs text-muted-foreground">Nothing hits the books until you issue it.</p>
+      <label className="block border-t border-border/60 px-4 py-3">
+        <span className="text-[11px] text-muted-foreground">What is it</span>
+        <Input id="desc" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Design, software, consulting" className="mt-1 h-11 bg-transparent px-0 shadow-none focus-visible:shadow-none" />
+      </label>
+      <label className="block border-t border-border/60 px-4 py-3">
+        <span className="text-[11px] text-muted-foreground">Amount</span>
+        <Input id="rate" inputMode="decimal" value={rate} onChange={(event) => setRate(event.target.value)} placeholder="0" className="mt-1 h-11 bg-transparent px-0 shadow-none focus-visible:shadow-none" />
+      </label>
+      {customers.length > 0 && (
+        <label className="block border-t border-border/60 px-4 py-3">
+          <span className="text-[11px] text-muted-foreground">Customer</span>
+          <select className="mt-1 h-11 w-full bg-transparent text-base outline-none" value={customerId} onChange={(event) => setCustomerId(event.target.value)}>
             {customers.map((customer) => (
               <option key={customer.id} value={customer.id}>{customer.name}</option>
             ))}
             <option value="">Someone new</option>
           </select>
-        </>
-      ) : null}
-      {!customerId && (
-        <>
-          <Label htmlFor="cname">Customer</Label>
-          <Input id="cname" value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Name" />
-        </>
+        </label>
       )}
-      <Label>GST %</Label>
-      <select className="h-11 rounded-md bg-secondary px-3" value={gstRate} onChange={(event) => setGstRate(Number(event.target.value))}>
-        {[0, 5, 12, 18, 28].map((rateOption) => (
-          <option key={rateOption} value={rateOption}>{rateOption}</option>
-        ))}
-      </select>
-      <Label>Place of supply</Label>
-      <select className="h-11 rounded-md bg-secondary px-3" value={place} onChange={(event) => setPlace(event.target.value)}>
-        {INDIA_STATES.map((state) => (
-          <option key={state.code} value={state.code}>{state.name}</option>
-        ))}
-      </select>
-      <Button type="submit" className="h-11">Save draft</Button>
+      {!customerId && (
+        <label className="block border-t border-border/60 px-4 py-3">
+          <span className="text-[11px] text-muted-foreground">Customer</span>
+          <Input id="cname" value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Name" className="mt-1 h-11 bg-transparent px-0 shadow-none focus-visible:shadow-none" />
+        </label>
+      )}
+      <div className="border-t border-border/60 px-4 py-3">
+        <p className="text-[11px] text-muted-foreground">GST</p>
+        <div className="mt-2 grid grid-cols-5 gap-1.5">
+          {[0, 5, 12, 18, 28].map((rateOption) => (
+            <button
+              key={rateOption}
+              type="button"
+              className={`h-10 rounded-md text-sm ${gstRate === rateOption ? "bg-foreground text-background" : "bg-secondary text-muted-foreground"}`}
+              onClick={() => setGstRate(rateOption)}
+            >
+              {rateOption}%
+            </button>
+          ))}
+        </div>
+      </div>
+      <label className="block border-t border-border/60 px-4 py-3">
+        <span className="text-[11px] text-muted-foreground">Place of supply</span>
+        <select className="mt-1 h-11 w-full bg-transparent text-base outline-none" value={place} onChange={(event) => setPlace(event.target.value)}>
+          {INDIA_STATES.map((state) => (
+            <option key={state.code} value={state.code}>{state.name}</option>
+          ))}
+        </select>
+      </label>
+      <div className="border-t border-border/60 p-3">
+        <Button type="submit" className="h-11 w-full">Save draft</Button>
+      </div>
     </form>
   );
 }

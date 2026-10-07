@@ -17,6 +17,7 @@ import { addDaysISO, publicError } from "@/lib/utils";
 import type { Sql } from "@/lib/db";
 import type { AccountType, BudgetPeriod, ProjectStatus, ProjectType, TxnType } from "@/lib/types";
 import { defaultUsefulYears } from "@/lib/server/commitments";
+import { importProjectActivity } from "@/lib/server/business";
 import type { SplitMethod } from "@/lib/split";
 
 export type AssistantAction = { tool: string; summary: string; ok: boolean };
@@ -461,6 +462,39 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "get_business",
+      description: "Business overview for a company project such as Munafa. Lists every transaction on it and what the company owes people who paid personally. Not a split.",
+      parameters: {
+        type: "object",
+        properties: { project: { type: "string", description: "Business project id or name" } },
+        required: ["project"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "record_business_expense",
+      description: "Record a business cost so it shows on that business overview and moves the company position. If someone paid with their own money, the company owes them. That is not ownership and not a split.",
+      parameters: {
+        type: "object",
+        properties: {
+          project: { type: "string", description: "Business name, e.g. Munafa" },
+          amount: { type: "string" },
+          description: { type: "string", description: "Short English title. Translate Hindi." },
+          date: { type: "string", description: "YYYY-MM-DD. Default today IST." },
+          paid_by: { type: "string", description: "Who paid. Their name, or me. Default me." },
+          account: { type: "string", description: "Account to tag on the personal ledger. Omit if there is only one." },
+        },
+        required: ["project", "amount", "description"],
+        additionalProperties: false,
+      },
+    },
+  },
 ] as const;
 
 async function resolveByName(
@@ -673,6 +707,24 @@ async function loadOverview(sql: Sql, userId: string) {
     `,
   ]);
 
+  const businessActivity = await sql<{ project: string; memo: string | null; amount: string; payer: string | null; spent_on: string }>`
+    select p.name as project, e.memo, e.amount::text as amount, pr.full_name as payer, e.spent_on::text as spent_on
+    from biz_expenses e
+    join businesses b on b.id = e.business_id
+    join projects p on p.id = b.project_id
+    left join profiles pr on pr.id = e.payer_user_id
+    where e.environment = 'live'
+      and (
+        p.user_id = ${userId}
+        or exists (
+          select 1 from biz_members m
+          where m.business_id = b.id and m.user_id = ${userId} and m.status = 'active'
+        )
+      )
+    order by e.spent_on desc
+    limit 40
+  `;
+
   return {
     today,
     month: { from: start, to: end, income: stats[0]?.income ?? "0.00", expense: stats[0]?.expense ?? "0.00" },
@@ -693,6 +745,7 @@ async function loadOverview(sql: Sql, userId: string) {
     monthlyIn,
     monthlyOut,
     owned,
+    businessActivity,
   };
 }
 
@@ -716,6 +769,33 @@ async function pickAccount(sql: Sql, userId: string, name: string) {
   throw new Error(`Which account? ${rows.map((row) => row.name).join(", ")}`);
 }
 
+async function isBusinessProject(sql: Sql, projectId: string) {
+  const rows = await sql<{ id: string }>`select id from businesses where project_id = ${projectId}`;
+  return Boolean(rows[0]);
+}
+
+async function businessPayer(sql: Sql, projectId: string, actorId: string, name: string) {
+  if (!name || /^(me|i|myself|main)$/i.test(name)) return actorId;
+  const rows = await sql<{ user_id: string; full_name: string | null }>`
+    select s.user_id, p.full_name
+    from (
+      select user_id from projects where id = ${projectId}
+      union
+      select user_id from project_members where project_id = ${projectId} and status = 'active'
+      union
+      select m.user_id from biz_members m
+      join businesses b on b.id = m.business_id
+      where b.project_id = ${projectId} and m.status = 'active'
+    ) s
+    left join profiles p on p.id = s.user_id
+  `;
+  const key = name.trim().toLowerCase();
+  const hit = rows.find((row) => (row.full_name || "").toLowerCase() === key)
+    || rows.find((row) => (row.full_name || "").toLowerCase().includes(key));
+  if (!hit) throw new Error(`Couldn't find ${name} on this business`);
+  return hit.user_id;
+}
+
 async function runTool(
   sql: Sql,
   userId: string,
@@ -732,6 +812,53 @@ async function runTool(
   if (name === "get_overview") {
     const overview = await loadOverview(sql, userId);
     return { result: overview, summary: "Looked up the ledger", mutated: false };
+  }
+
+  if (name === "get_business" || name === "record_business_expense") {
+    const project = await resolveAccessibleProject(sql, userId, str("project"));
+    const biz = await sql<{ id: string }>`select id from businesses where project_id = ${project.id}`;
+    if (!biz[0]) throw new Error(`${project.name} is not a business`);
+    if (name === "record_business_expense") {
+      const amount = parseMoney(str("amount"));
+      if (amount === "0.00" || amount.startsWith("-")) throw new Error("Amount must be greater than zero");
+      const description = str("description");
+      if (!description) throw new Error("Say what it was");
+      const payer = await businessPayer(sql, project.id, userId, str("paid_by"));
+      const acc = await pickAccount(sql, userId, str("account"));
+      const date = str("date") || todayIST();
+      const id = crypto.randomUUID();
+      await sql`
+        insert into transactions (
+          id, user_id, account_id, project_id, type, amount, transaction_date, description,
+          is_committed, paid_by_user_id, visibility
+        ) values (
+          ${id}, ${userId}, ${acc.id}, ${project.id}, 'expense', ${amount}::numeric, ${date}::date, ${description},
+          true, ${payer}, 'personal'
+        )
+      `;
+      await importProjectActivity(sql, userId, biz[0].id, project.id);
+      const who = payer === userId ? "you" : str("paid_by");
+      return {
+        result: { id, amount, description, date, paidBy: who, project: project.name },
+        summary: `${project.name}: ${description} ₹${amount}, paid by ${who}. The company owes them if it was personal money. Not a share.`,
+        mutated: true,
+      };
+    }
+    const rows = await sql<{ memo: string | null; amount: string; spent_on: string; payer: string | null; kind: string }>`
+      select e.memo, e.amount::text as amount, e.spent_on::text as spent_on, pr.full_name as payer, e.payer_kind as kind
+      from biz_expenses e
+      left join profiles pr on pr.id = e.payer_user_id
+      where e.business_id = ${biz[0].id} and e.environment = 'live'
+      order by e.spent_on desc, e.id desc
+    `;
+    const owed = rows
+      .filter((row) => row.kind === "personal")
+      .reduce((sum, row) => addMoney(sum, row.amount), "0.00");
+    return {
+      result: { project: project.name, owedToPeople: owed, transactions: rows },
+      summary: `${project.name} has ${rows.length} transactions`,
+      mutated: false,
+    };
   }
 
   if (name === "list_transactions") {
@@ -875,6 +1002,10 @@ async function runTool(
     }
     const verb = isUpdate ? "Updated" : "Added";
     const label = description || type;
+    if (projectId && (type === "expense" || type === "income" || type === "refund")) {
+      const biz = await sql<{ id: string }>`select id from businesses where project_id = ${projectId}`;
+      if (biz[0]) await importProjectActivity(sql, userId, biz[0].id, projectId);
+    }
     return {
       result: { id, type, amount, account: acc.name, date, description },
       summary: `${verb} ${type} ₹${amount} · ${label}`,
@@ -1083,6 +1214,9 @@ async function runTool(
 
   if (name === "get_split" || name === "add_split_expense" || name === "settle_project" || name === "invite_to_project") {
     const project = await resolveAccessibleProject(sql, userId, str("project"));
+    if ((name === "add_split_expense" || name === "settle_project") && (await isBusinessProject(sql, project.id))) {
+      throw new Error(`${project.name} is a business, not a split. Use record_business_expense. Money paid personally is owed back by the company. It is not a share.`);
+    }
     if (name === "invite_to_project") {
       const invite = await issueInvite(sql, userId, project.id);
       const url = origin ? `${origin}${invite.path}` : invite.path;
@@ -1485,6 +1619,8 @@ MONTHLY
 SPLITTING
 - Your own project expense, with no one else sharing it: add_transaction. It reduces your remaining and creates no debt.
 - A cost split with other members: add_split_expense. Default visibility shared and method equal. Use exact, percentage, or shares only when they gave numbers. paid_by is me if they paid.
+- A business project is not a split. Never add_split_expense or settle_project on it. Use record_business_expense. If Rehbar or anyone paid with their own money, pass paid_by. The company owes them. That does not change who owns the company.
+- get_business lists every transaction on that business. Company position is the result (negative when you have only spent). Cash the owner put in is not the position and not a sale.
 - private is only the named people and stays out of the group balance.
 - Participants must already be members, matched from the snapshot. If the other person is not a member, invite_to_project and give them the url. Do not invent people. Do not split with only yourself.
 - get_split answers who pays whom. When they ask to settle, call settle_project in the same turn. If they name more than the debt, omit amount so only the owed payment is recorded, then say you recorded that and not the extra. Never only promise to settle. Private debts are not cleared by settle_project.

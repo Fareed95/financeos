@@ -125,6 +125,27 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
   const moneyFmt = (value: string) => formatMoney(value, currency, { compact: true });
   const selfId = user?.id || data.people.find((person) => person.role === "owner")?.userId || "";
   const inPeriod = data.expenses.filter((row) => row.spentOn >= data.range.from && row.spentOn <= data.range.to);
+  const booked = new Set(data.expenses.map((row) => row.id));
+  const feed = [
+    ...data.expenses.map((row) => ({
+      id: row.id,
+      title: row.memo || data.expenseAccounts.find((account) => account.code === row.account_code)?.name || "Expense",
+      who: row.payerName || data.people.find((person) => person.userId === row.payerUserId)?.name || "",
+      kind: row.payerKind === "personal" ? "Paid personally" : row.payerKind === "unpaid" ? "Not paid yet" : "Business account",
+      date: row.spentOn,
+      amount: row.amount,
+      income: false,
+    })),
+    ...((data.activity ?? []).filter((row) => !booked.has(`legacy-${row.id}`))).map((row) => ({
+        id: row.id,
+        title: row.memo,
+        who: row.payerName || "",
+        kind: row.type === "expense" ? "Paid personally" : row.type === "income" ? "Income" : row.type,
+        date: row.spentOn,
+        amount: row.amount,
+        income: row.type === "income" || row.type === "refund",
+      })),
+  ].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   const periodSpend = inPeriod.reduce((sum, row) => sum + toCents(row.amount), 0n);
   const byAccount = new Map<string, bigint>();
   for (const row of inPeriod) byAccount.set(row.account_code, (byAccount.get(row.account_code) ?? 0n) + toCents(row.amount));
@@ -264,20 +285,16 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
                 <p className="mt-1 text-sm text-muted-foreground">{moneyFmt(data.payable)} due to vendors</p>
               )}
             </div>
-            {data.expenses.length > 0 && (
-              <BusinessSection title="Recent" action={<button type="button" className="text-xs text-muted-foreground" onClick={() => open("expenses")}>All</button>}>
-                {data.expenses.slice(0, 6).map((row) => {
-                  const personal = row.payerKind === "personal";
-                  const who = row.payerName || data.people.find((person) => person.userId === row.payerUserId)?.name;
-                  return (
-                    <BusinessListRow
-                      key={row.id}
-                      title={row.memo || data.expenseAccounts.find((account) => account.code === row.account_code)?.name || "Expense"}
-                      meta={[who, personal ? "Paid personally" : row.payerKind === "unpaid" ? "Not paid yet" : "Business account", row.spentOn].filter(Boolean).join(" · ")}
-                      value={moneyFmt(row.amount)}
-                    />
-                  );
-                })}
+            {feed.length > 0 && (
+              <BusinessSection title="Transactions" action={<button type="button" className="text-xs text-muted-foreground" onClick={() => open("expenses")}>Expenses</button>}>
+                {feed.map((row) => (
+                  <BusinessListRow
+                    key={row.id}
+                    title={row.title}
+                    meta={[row.who, row.kind, row.date].filter(Boolean).join(" · ")}
+                    value={row.income ? `+${moneyFmt(row.amount)}` : moneyFmt(row.amount)}
+                  />
+                ))}
               </BusinessSection>
             )}
             {isZero(books.totalRevenue) && inPeriod.length === 0 ? (

@@ -1,4 +1,5 @@
 import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-router";
+import { useEffect } from "react";
 import { AuthProvider } from "@/lib/auth/provider";
 import { PreviewHostBridge } from "@/components/preview-host-bridge";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -27,7 +28,7 @@ export const Route = createRootRoute({
   head: () => ({
     meta: [
       { charSet: "utf-8" },
-      { name: "viewport", content: "width=device-width, initial-scale=1, viewport-fit=cover" },
+      { name: "viewport", content: "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" },
       { title: APP_NAME },
       { name: "application-name", content: APP_NAME },
       { name: "theme-color", content: "#0c0c0d" },
@@ -57,6 +58,27 @@ export const Route = createRootRoute({
 });
 
 function Root() {
+  useEffect(() => {
+    const meta = document.querySelector('meta[name="viewport"]');
+    meta?.setAttribute("content", "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover");
+    const blockGesture = (event: Event) => event.preventDefault();
+    const blockPinch = (event: TouchEvent) => {
+      if (event.touches.length > 1) event.preventDefault();
+    };
+    const blockWheel = (event: WheelEvent) => {
+      if (event.ctrlKey) event.preventDefault();
+    };
+    document.addEventListener("gesturestart", blockGesture, { passive: false });
+    document.addEventListener("gesturechange", blockGesture, { passive: false });
+    document.addEventListener("touchmove", blockPinch, { passive: false });
+    window.addEventListener("wheel", blockWheel, { passive: false });
+    return () => {
+      document.removeEventListener("gesturestart", blockGesture);
+      document.removeEventListener("gesturechange", blockGesture);
+      document.removeEventListener("touchmove", blockPinch);
+      window.removeEventListener("wheel", blockWheel);
+    };
+  }, []);
   return (
     <html lang="en" className="dark antialiased" suppressHydrationWarning>
       <head>

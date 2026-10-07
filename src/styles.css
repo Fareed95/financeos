@@ -108,6 +108,8 @@
   html {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    -webkit-text-size-adjust: 100%;
+    touch-action: manipulation;
     background: var(--background);
     color: var(--foreground);
   }
@@ -136,6 +138,7 @@
 
   input, textarea, select {
     font: inherit;
+    font-size: 16px;
   }
 
   :focus-visible {
@@ -255,6 +258,13 @@ html[data-business="1"] .fos-tabbar a {
 }
 html[data-business="1"] .fos-tabbar a.text-foreground {
   opacity: 0.9;
+}
+
+/* Phone browsers zoom the page when a field is under 16px. Keep every field at 16px. */
+input,
+select,
+textarea {
+  font-size: 16px !important;
 }
 
 .fos-composer {

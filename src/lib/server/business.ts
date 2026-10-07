@@ -223,8 +223,9 @@ function accountForCategory(label: string) {
 }
 
 /**
- * Munafa was used as a split before these business books.
- * Once: drop that split, void the starting cash, and record those spends as money the company owes.
+ * Munafa's starting cash and old split are removed once.
+ * Every business keeps pulling in project transactions that are not on the books yet,
+ * so the overview shows the full list and the position includes them.
  */
 export async function absorbLegacyMunafa(sql: Sql, actorId: string, businessId: string) {
   const project = await sql<{ id: string; name: string; settled: string | null }>`
@@ -234,23 +235,33 @@ export async function absorbLegacyMunafa(sql: Sql, actorId: string, businessId: 
     where b.id = ${businessId}
   `;
   const row = project[0];
-  if (!row || row.settled || row.name.trim().toLowerCase() !== "munafa") return;
+  if (!row) return;
+  if (!row.settled && row.name.trim().toLowerCase() === "munafa") {
+    await sql`
+      update journal_entries set status = 'void'
+      where business_id = ${businessId}
+        and status = 'posted'
+        and source in ('capital', 'opening', 'opening_full', 'contribution')
+    `;
+    await sql`
+      delete from expense_splits
+      where transaction_id in (select id from transactions where project_id = ${row.id})
+    `;
+    await sql`delete from settlements where project_id = ${row.id}`;
+    await sql`update projects set collaboration = 'personal' where id = ${row.id}`;
+    await sql`
+      update businesses
+      set legacy_settled_at = now(), setup_completed_at = coalesce(setup_completed_at, now())
+      where id = ${businessId}
+    `;
+  }
+  await importProjectActivity(sql, actorId, businessId, row.id);
+}
 
-  await sql`
-    update journal_entries set status = 'void'
-    where business_id = ${businessId}
-      and status = 'posted'
-      and source in ('capital', 'opening', 'opening_full', 'contribution')
-  `;
-  await sql`
-    delete from expense_splits
-    where transaction_id in (select id from transactions where project_id = ${row.id})
-  `;
-  await sql`delete from settlements where project_id = ${row.id}`;
-  await sql`update projects set collaboration = 'personal' where id = ${row.id}`;
-
+export async function importProjectActivity(sql: Sql, actorId: string, businessId: string, projectId: string) {
   const txns = await sql<{
     id: string;
+    type: string;
     amount: string;
     description: string | null;
     transaction_date: string;
@@ -258,47 +269,58 @@ export async function absorbLegacyMunafa(sql: Sql, actorId: string, businessId: 
     user_id: string;
     category: string | null;
   }>`
-    select t.id, t.amount::text as amount, t.description, t.transaction_date::text as transaction_date,
+    select t.id, t.type, t.amount::text as amount, t.description, t.transaction_date::text as transaction_date,
            t.paid_by_user_id, t.user_id, c.name as category
     from transactions t
     left join categories c on c.id = t.category_id
-    where t.project_id = ${row.id} and t.type = 'expense'
+    where t.project_id = ${projectId} and t.type in ('expense', 'income', 'refund')
   `;
   for (const txn of txns) {
     const expenseId = `legacy-${txn.id}`;
     const already = await sql<{ id: string }>`select id from biz_expenses where id = ${expenseId}`;
     if (already[0]) continue;
+    const posted = await sql<{ id: string }>`
+      select id from journal_entries
+      where business_id = ${businessId} and source = 'expense' and source_id = ${`legacy-txn:${txn.id}`} and status = 'posted'
+    `;
+    if (posted[0]) continue;
     const amount = toCents(txn.amount);
     if (amount <= 0n) continue;
     const label = `${txn.category || ""} ${txn.description || ""}`;
-    const code = accountForCategory(label);
+    if (/starting|opening balance|capital|money added|owner funding/i.test(label)) continue;
     const date = txn.transaction_date.slice(0, 10);
-    const memo = txn.description?.trim() || txn.category || "Expense";
+    const memo = txn.description?.trim() || txn.category || (txn.type === "expense" ? "Expense" : "Income");
     const payer = txn.paid_by_user_id || txn.user_id;
-    const journalId = await postJournal(sql, actorId, businessId, {
-      date,
-      memo,
-      source: "expense",
-      sourceId: `legacy-txn:${txn.id}`,
-      lines: [moneyLine(code, amount, 0n), moneyLine("2500", 0n, amount)],
-    });
-    await sql`
-      insert into biz_expenses (
-        id, business_id, account_code, amount, memo, paid, spent_on, journal_id, environment,
-        payer_kind, payer_user_id, reimbursed, place
-      ) values (
-        ${expenseId}, ${businessId}, ${code}, ${fromCents(amount)}::numeric, ${memo},
-        false, ${date}::date, ${journalId}, 'live',
-        'personal', ${payer}, 0, null
-      )
-      on conflict (id) do nothing
-    `;
+    if (txn.type === "expense") {
+      const code = accountForCategory(label);
+      const journalId = await postJournal(sql, actorId, businessId, {
+        date,
+        memo,
+        source: "expense",
+        sourceId: `legacy-txn:${txn.id}`,
+        lines: [moneyLine(code, amount, 0n), moneyLine("2500", 0n, amount)],
+      });
+      await sql`
+        insert into biz_expenses (
+          id, business_id, account_code, amount, memo, paid, spent_on, journal_id, environment,
+          payer_kind, payer_user_id, reimbursed, place
+        ) values (
+          ${expenseId}, ${businessId}, ${code}, ${fromCents(amount)}::numeric, ${memo},
+          false, ${date}::date, ${journalId}, 'live',
+          'personal', ${payer}, 0, null
+        )
+        on conflict (id) do nothing
+      `;
+    } else {
+      await postJournal(sql, actorId, businessId, {
+        date,
+        memo,
+        source: "expense",
+        sourceId: `legacy-txn:${txn.id}`,
+        lines: [moneyLine("1010", amount, 0n), moneyLine("4200", 0n, amount)],
+      });
+    }
   }
-  await sql`
-    update businesses
-    set legacy_settled_at = now(), setup_completed_at = coalesce(setup_completed_at, now())
-    where id = ${businessId}
-  `;
 }
 
 export async function issueInvoice(
@@ -717,6 +739,23 @@ export const getBusiness = createServerFn({ method: "POST" })
         where e.business_id = ${businessId} and e.environment = 'live'
         order by e.spent_on desc
       `;
+      const activity = await sql<{
+        id: string;
+        type: string;
+        amount: string;
+        description: string | null;
+        transaction_date: string;
+        payer_name: string | null;
+        category: string | null;
+      }>`
+        select t.id, t.type, t.amount::text as amount, t.description, t.transaction_date::text as transaction_date,
+               pr.full_name as payer_name, c.name as category
+        from transactions t
+        left join profiles pr on pr.id = coalesce(t.paid_by_user_id, t.user_id)
+        left join categories c on c.id = t.category_id
+        where t.project_id = (select project_id from businesses where id = ${businessId})
+        order by t.transaction_date desc, t.created_at desc
+      `;
       const keys = await sql<{ id: string; name: string; prefix: string; environment: string; scopes: string; revoked_at: string | null }>`
         select id, name, prefix, environment, scopes, revoked_at::text as revoked_at
         from biz_api_keys where business_id = ${businessId} order by created_at desc
@@ -834,6 +873,15 @@ export const getBusiness = createServerFn({ method: "POST" })
           payerName: row.payer_name,
           reimbursed: row.reimbursed,
           place: row.place,
+        })),
+        activity: activity.map((row) => ({
+          id: row.id,
+          type: row.type,
+          amount: row.amount,
+          memo: row.description || row.category || row.type,
+          spentOn: row.transaction_date.slice(0, 10),
+          payerName: row.payer_name,
+          category: row.category,
         })),
         people: people
           .filter((person, index, list) => person.user_id && list.findIndex((item) => item.user_id === person.user_id) === index)
