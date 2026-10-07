@@ -211,6 +211,96 @@ function moneyLine(code: string, debit: bigint, credit: bigint): DraftLine {
   return { code, debit, credit };
 }
 
+function accountForCategory(label: string) {
+  const name = label.toLowerCase();
+  if (/salary|wage|payroll|stipend/.test(name)) return "5100";
+  if (/rent|office/.test(name)) return "5200";
+  if (/market|ads|ad /.test(name)) return "5300";
+  if (/software|aws|domain|host|figma|google|subscription|saas/.test(name)) return "5400";
+  if (/travel|uber|ola|flight|hotel|fuel|cab|train/.test(name)) return "5500";
+  if (/tax|gst/.test(name)) return "5900";
+  return "5600";
+}
+
+/**
+ * Munafa was used as a split before these business books.
+ * Once: drop that split, void the starting cash, and record those spends as money the company owes.
+ */
+export async function absorbLegacyMunafa(sql: Sql, actorId: string, businessId: string) {
+  const project = await sql<{ id: string; name: string; settled: string | null }>`
+    select p.id, p.name, b.legacy_settled_at::text as settled
+    from businesses b
+    join projects p on p.id = b.project_id
+    where b.id = ${businessId}
+  `;
+  const row = project[0];
+  if (!row || row.settled || row.name.trim().toLowerCase() !== "munafa") return;
+
+  await sql`
+    update journal_entries set status = 'void'
+    where business_id = ${businessId}
+      and status = 'posted'
+      and source in ('capital', 'opening', 'opening_full', 'contribution')
+  `;
+  await sql`
+    delete from expense_splits
+    where transaction_id in (select id from transactions where project_id = ${row.id})
+  `;
+  await sql`delete from settlements where project_id = ${row.id}`;
+  await sql`update projects set collaboration = 'personal' where id = ${row.id}`;
+
+  const txns = await sql<{
+    id: string;
+    amount: string;
+    description: string | null;
+    transaction_date: string;
+    paid_by_user_id: string | null;
+    user_id: string;
+    category: string | null;
+  }>`
+    select t.id, t.amount::text as amount, t.description, t.transaction_date::text as transaction_date,
+           t.paid_by_user_id, t.user_id, c.name as category
+    from transactions t
+    left join categories c on c.id = t.category_id
+    where t.project_id = ${row.id} and t.type = 'expense'
+  `;
+  for (const txn of txns) {
+    const expenseId = `legacy-${txn.id}`;
+    const already = await sql<{ id: string }>`select id from biz_expenses where id = ${expenseId}`;
+    if (already[0]) continue;
+    const amount = toCents(txn.amount);
+    if (amount <= 0n) continue;
+    const label = `${txn.category || ""} ${txn.description || ""}`;
+    const code = accountForCategory(label);
+    const date = txn.transaction_date.slice(0, 10);
+    const memo = txn.description?.trim() || txn.category || "Expense";
+    const payer = txn.paid_by_user_id || txn.user_id;
+    const journalId = await postJournal(sql, actorId, businessId, {
+      date,
+      memo,
+      source: "expense",
+      sourceId: `legacy-txn:${txn.id}`,
+      lines: [moneyLine(code, amount, 0n), moneyLine("2500", 0n, amount)],
+    });
+    await sql`
+      insert into biz_expenses (
+        id, business_id, account_code, amount, memo, paid, spent_on, journal_id, environment,
+        payer_kind, payer_user_id, reimbursed, place
+      ) values (
+        ${expenseId}, ${businessId}, ${code}, ${fromCents(amount)}::numeric, ${memo},
+        false, ${date}::date, ${journalId}, 'live',
+        'personal', ${payer}, 0, null
+      )
+      on conflict (id) do nothing
+    `;
+  }
+  await sql`
+    update businesses
+    set legacy_settled_at = now(), setup_completed_at = coalesce(setup_completed_at, now())
+    where id = ${businessId}
+  `;
+}
+
 export async function issueInvoice(
   sql: Sql,
   actorId: string,
@@ -582,6 +672,7 @@ export const getBusiness = createServerFn({ method: "POST" })
       const { sql } = await ensureUser(context.userId);
       const access = await requireBusiness(sql, context.userId, data.projectId, "view_finance");
       const businessId = access.businessId;
+      await absorbLegacyMunafa(sql, context.userId, businessId);
       const today = data.today || new Date().toISOString().slice(0, 10);
       const range = periodRange(today, data.period || "month");
       const lines = await loadLines(sql, businessId);
@@ -616,11 +707,15 @@ export const getBusiness = createServerFn({ method: "POST" })
         payer_user_id: string | null;
         reimbursed: string;
         place: string | null;
+        payer_name: string | null;
       }>`
-        select id, account_code, amount::text as amount, memo, paid, spent_on::text as spent_on,
-               payer_kind, payer_user_id, reimbursed::text as reimbursed, place
-        from biz_expenses where business_id = ${businessId} and environment = 'live'
-        order by spent_on desc
+        select e.id, e.account_code, e.amount::text as amount, e.memo, e.paid, e.spent_on::text as spent_on,
+               e.payer_kind, e.payer_user_id, e.reimbursed::text as reimbursed, e.place,
+               p.full_name as payer_name
+        from biz_expenses e
+        left join profiles p on p.id = e.payer_user_id
+        where e.business_id = ${businessId} and e.environment = 'live'
+        order by e.spent_on desc
       `;
       const keys = await sql<{ id: string; name: string; prefix: string; environment: string; scopes: string; revoked_at: string | null }>`
         select id, name, prefix, environment, scopes, revoked_at::text as revoked_at
@@ -702,6 +797,7 @@ export const getBusiness = createServerFn({ method: "POST" })
         { revenue: currentBooks.totalRevenue, expenses: expenseParts(currentBooks), profit: currentBooks.netProfit },
       );
       const runway = runwayFrom(cash, recentMonthRanges(today, 3).map((window) => buildStatements(lines, window.from, window.to).operating));
+      const position = buildStatements(lines, "2000-01-01", "2100-12-31").netProfit;
       return {
         businessId,
         role: access.role,
@@ -710,6 +806,7 @@ export const getBusiness = createServerFn({ method: "POST" })
         setupDone: Boolean(opening[0] || profile[0]?.setup_completed_at),
         businessKind: profile[0]?.business_kind ?? null,
         cash: fromCents(cash),
+        position: fromCents(position),
         bank: fromCents(bank),
         cashBox: fromCents(cashBox),
         petty: fromCents(petty),
@@ -734,6 +831,7 @@ export const getBusiness = createServerFn({ method: "POST" })
           spentOn: row.spent_on.slice(0, 10),
           payerKind: row.payer_kind,
           payerUserId: row.payer_user_id,
+          payerName: row.payer_name,
           reimbursed: row.reimbursed,
           place: row.place,
         })),

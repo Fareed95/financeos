@@ -133,7 +133,7 @@ async function createPgliteSql(): Promise<Sql> {
   const pg = await globalRef.__pgliteInstance__;
 
   // Apply migrations/ (the single schema source) so preview matches production.
-  // Includes income sources, recurring bills, owned assets, and ownership decisions.
+  // Includes income sources, recurring bills, owned assets, ownership decisions, and legacy book cleanup.
   // SQL is inlined by the bundler via import.meta.glob (no runtime fs); applied
   // once per filename, including invoice v2.
   // files are tracked in _migrations. The glob does not descend, so the opt-in

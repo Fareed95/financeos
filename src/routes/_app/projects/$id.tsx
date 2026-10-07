@@ -71,14 +71,10 @@ function ProjectDetail() {
 
   if (project.projectType === "business") {
     return (
-      <div className="space-y-6 pt-4 pb-16">
-        <div>
-          <Link to="/projects" className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-            <ArrowLeft className="size-3.5" /> Projects
-          </Link>
-          <h1 className="mt-2 font-display text-3xl tracking-tight">{project.name}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Business</p>
-        </div>
+      <div className="pb-16">
+        <Link to="/projects" className="inline-flex items-center gap-1 pt-4 text-xs text-muted-foreground">
+          <ArrowLeft className="size-3.5" /> Projects
+        </Link>
         <BusinessWorkspace projectId={project.id} projectName={project.name} currency={currency} />
       </div>
     );

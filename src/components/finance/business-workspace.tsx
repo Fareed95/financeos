@@ -177,22 +177,43 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
         </NavGroup>
       </aside>
       <div className="min-w-0 space-y-4 pb-6">
-        <div className="grid grid-cols-4 gap-1.5 lg:hidden">
+        <div className="sticky top-0 z-30 -mx-4 grid grid-cols-4 gap-1.5 bg-background px-4 py-2 lg:hidden">
           <Tab label="Overview" active={section === "home"} onClick={() => open("home")} />
           <Tab label="Sales" active={section === "invoices"} onClick={() => open("invoices")} />
           <Tab label="Expenses" active={section === "expenses"} onClick={() => open("expenses")} />
           <Tab label="More" active={more} onClick={() => setMore((value) => !value)} />
         </div>
         {more && (
-          <div className="space-y-3 rounded-xl border border-border/70 p-3 lg:hidden">
-            <MoreGroup title="Money" items={[["money", "Accounts"], ["invoices", "Money to collect"], ["bills", "Money to pay"], ["reimbursements", "Reimbursements"]]} section={section} open={open} />
-            <MoreGroup title="Sales" items={[["invoices", "Invoices"], ["invoices", "Customers"]]} section={section} open={open} />
-            <MoreGroup title="Spending" items={[["expenses", "Expenses"], ["vendors", "Vendors"], ["bills", "Bills"]]} section={section} open={open} />
-            <MoreGroup title="Planning" items={[["budgets", "Budgets"], ["loans", "Loans"], ["assets", "Assets"]]} section={section} open={open} />
-            <MoreGroup title="Business" items={[["reports", "Reports"], ...(canEquity ? [["equity", "Equity"] as const] : []), ["team", "Team"]]} section={section} open={open} />
-            <MoreGroup title="System" items={[["guide", "Guide"], ...(canDev ? [["developer", "Developer"] as const] : []), ["settings", "Settings"]]} section={section} open={open} />
+          <div className="space-y-5 lg:hidden">
+            <MoreGroup title="Money" items={[
+              ["money", "Accounts", "Bank, cash, and transfers"],
+              ["reimbursements", "Reimbursements", "Money the company owes the team"],
+              ["invoices", "Money to collect", "Invoices waiting to be paid"],
+              ["bills", "Money to pay", "Bills you still owe"],
+            ]} section={section} open={open} />
+            <MoreGroup title="Spending" items={[
+              ["expenses", "Expenses", "What the business spent"],
+              ["vendors", "Vendors", "People you pay"],
+              ["bills", "Bills", "Open vendor bills"],
+            ]} section={section} open={open} />
+            <MoreGroup title="Planning" items={[
+              ["budgets", "Budgets", "What you planned to spend"],
+              ["loans", "Loans", "Money borrowed"],
+              ["assets", "Assets", "Things the business owns"],
+            ]} section={section} open={open} />
+            <MoreGroup title="Business" items={[
+              ["reports", "Reports", "Profit, cash, and what you owe"],
+              ...(canEquity ? [["equity", "Equity", "Who owns the company"] as const] : []),
+              ["team", "Team", "Who can open this business"],
+            ]} section={section} open={open} />
+            <MoreGroup title="System" items={[
+              ["guide", "Guide", "Plain-language explanations"],
+              ...(canDev ? [["developer", "Developer", "API keys"] as const] : []),
+              ["settings", "Settings", "Seller and tax details"],
+            ]} section={section} open={open} />
           </div>
         )}
+        <div className={more ? "hidden lg:contents" : "contents"}>
         {books.error && <p className="rounded-xl bg-card p-4 text-sm text-expense">{books.error}</p>}
         {section === "home" && (
           <div className="space-y-4">
@@ -221,18 +242,48 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
                 <button type="button" className="underline" onClick={() => { dismissLearnTip(); setShowTip(false); }}>Dismiss</button>
               </p>
             )}
-            <div className="rounded-xl bg-card px-4 py-3">
-              <p className="text-xs text-muted-foreground">Cash available</p>
-              <p className="mt-1 font-display text-[1.75rem] leading-none tabular">{moneyFmt(data.cash)}</p>
+            <div className="rounded-xl bg-card px-4 py-4">
+              <p className="text-xs text-muted-foreground">Company position</p>
+              <p className={`mt-1 font-display text-[1.75rem] leading-none tabular ${toCents(data.position) < 0n ? "text-expense" : ""}`}>{moneyFmt(data.position)}</p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {toCents(data.position) < 0n
+                  ? "The company is behind by this much. Sales and profit will raise it."
+                  : toCents(data.position) > 0n
+                    ? "Profit kept in the business. It is not cash you put in."
+                    : "No result yet. Spending shows here as a minus until sales come in."}
+              </p>
+              {!isZero(data.cash) && (
+                <p className="mt-2 text-sm text-muted-foreground">Cash in the business {moneyFmt(data.cash)}</p>
+              )}
               {toCents(data.reimbursementDue) > 0n && (
-                <p className="mt-2 text-sm text-muted-foreground">{moneyFmt(data.reimbursementDue)} is currently owed back to team members</p>
+                <button type="button" className="mt-2 block text-left text-sm text-muted-foreground underline" onClick={() => open("reimbursements")}>
+                  {moneyFmt(data.reimbursementDue)} still owed to people who paid personally
+                </button>
               )}
               {toCents(data.payable) > 0n && (
                 <p className="mt-1 text-sm text-muted-foreground">{moneyFmt(data.payable)} due to vendors</p>
               )}
             </div>
+            {data.expenses.length > 0 && (
+              <BusinessSection title="Recent" action={<button type="button" className="text-xs text-muted-foreground" onClick={() => open("expenses")}>All</button>}>
+                {data.expenses.slice(0, 6).map((row) => {
+                  const personal = row.payerKind === "personal";
+                  const who = row.payerName || data.people.find((person) => person.userId === row.payerUserId)?.name;
+                  return (
+                    <BusinessListRow
+                      key={row.id}
+                      title={row.memo || data.expenseAccounts.find((account) => account.code === row.account_code)?.name || "Expense"}
+                      meta={[who, personal ? "Paid personally" : row.payerKind === "unpaid" ? "Not paid yet" : "Business account", row.spentOn].filter(Boolean).join(" · ")}
+                      value={moneyFmt(row.amount)}
+                    />
+                  );
+                })}
+              </BusinessSection>
+            )}
             {isZero(books.totalRevenue) && inPeriod.length === 0 ? (
-              <BusinessEmptyState title="No sales yet" body="Create your first invoice to start tracking revenue. Money you put in is not a sale." action={<Button type="button" className="h-11" onClick={() => open("invoices")}>Create invoice</Button>} />
+              data.expenses.length === 0 ? (
+                <BusinessEmptyState title="No sales yet" body="Create your first invoice to start tracking revenue. Money you put in is not a sale." action={<Button type="button" className="h-11" onClick={() => open("invoices")}>Create invoice</Button>} />
+              ) : null
             ) : (
               <div className="grid grid-cols-2 gap-2">
                 <BusinessMetric label="Revenue" value={moneyFmt(books.totalRevenue)} />
@@ -265,8 +316,6 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
         {section === "invoices" && (
           <div className="space-y-3">
             <BusinessPageHeader title="Sales" context={projectName} aside={<LearnButton compact onClick={() => openLearn("invoices")} />} />
-            <p className="text-sm text-muted-foreground">Who owes you, and what you've sold.</p>
-            <Button type="button" className="h-11" onClick={() => { window.dispatchEvent(new Event("kharcha-new-invoice")); document.getElementById("new-invoice")?.scrollIntoView({ behavior: "smooth", block: "start" }); }}>Create invoice</Button>
             <InvoiceDesk projectId={projectId} currency={currency} startSetup={invoiceSetup} />
           </div>
         )}
@@ -465,6 +514,7 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
             <Button type="button" variant="ghost" className="mt-2 h-11 w-full" onClick={() => setAdd(false)}>Close</Button>
           </div>
         )}
+        </div>
         {learn && <LearnPanel page={learn} snapshot={snapshot} focusConcept={focusConcept} onClose={() => setLearn(null)} />}
         {prompt && (
           <div className="fixed inset-0 z-50 flex items-end justify-center bg-overlay p-4 pb-24 sm:items-center sm:pb-4" role="dialog" aria-modal="true" aria-labelledby="ownership-prompt-title">
@@ -539,16 +589,37 @@ function NavGroup({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function MoreGroup({ title, items, section, open }: { title: string; items: readonly (readonly [string, string])[]; section: Section; open: (next: Section) => void }) {
+function MoreGroup({
+  title,
+  items,
+  section,
+  open,
+}: {
+  title: string;
+  items: readonly (readonly [string, string, string])[];
+  section: Section;
+  open: (next: Section) => void;
+}) {
   return (
-    <div>
-      <p className="text-[11px] text-muted-foreground">{title}</p>
-      <div className="mt-1 grid">
-        {items.map(([id, label]) => (
-          <button key={`${title}-${label}`} type="button" className={`h-10 rounded-md px-2 text-left text-sm ${section === id ? "bg-foreground text-background" : ""}`} onClick={() => open(id as Section)}>{label}</button>
+    <section>
+      <p className="px-1 text-[11px] uppercase tracking-wide text-muted-foreground">{title}</p>
+      <div className="mt-1.5 overflow-hidden rounded-xl bg-card">
+        {items.map(([id, label, hint]) => (
+          <button
+            key={`${title}-${label}`}
+            type="button"
+            className={`flex min-h-14 w-full items-center justify-between gap-3 border-b border-border/50 px-3 text-left last:border-0 ${section === id ? "bg-secondary/80" : ""}`}
+            onClick={() => open(id as Section)}
+          >
+            <span className="min-w-0">
+              <span className="block text-sm font-medium">{label}</span>
+              <span className="block truncate text-xs text-muted-foreground">{hint}</span>
+            </span>
+            <span className="text-muted-foreground" aria-hidden="true">›</span>
+          </button>
         ))}
       </div>
-    </div>
+    </section>
   );
 }
 

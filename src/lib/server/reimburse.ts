@@ -326,6 +326,12 @@ export const getReimbursementDesk = createServerFn({ method: "POST" })
         where business_id = ${access.businessId} and payer_kind = 'personal' and environment = 'live'
         order by spent_on desc, id desc
       `;
+      const known = new Set(people.map((person) => person.userId));
+      const missing = [...new Set(expenses.map((row) => row.payer_user_id).filter((id): id is string => Boolean(id && !known.has(id))))];
+      for (const id of missing) {
+        const names = await sql<{ full_name: string | null }>`select full_name from profiles where id = ${id}`;
+        people.push({ userId: id, name: names[0]?.full_name || "Team member", role: "member" });
+      }
       const nameOf = new Map(CHART.map((account) => [account.code, account.name]));
       let total = 0n;
       const grouped = people.map((person) => {

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { INDIA_STATES } from "@/lib/gst";
-import { formatMoney } from "@/lib/money";
+import { formatMoney, isZero } from "@/lib/money";
 import {
   creditBusinessInvoice,
   downloadInvoicePdf,
@@ -22,14 +22,12 @@ export function InvoiceDesk({ projectId, currency, startSetup = false }: { proje
   const today = todayISO();
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["invoices", projectId, today], queryFn: () => getInvoiceDesk({ data: { projectId, today } }) });
-  const [setup, setSetup] = useState(startSetup);
-  const [customersOpen, setCustomersOpen] = useState(false);
-  const [composer, setComposer] = useState(false);
+  const [panel, setPanel] = useState<"none" | "seller" | "customer" | "draft">(startSetup ? "seller" : "none");
   useEffect(() => {
-    if (startSetup) setSetup(true);
+    if (startSetup) setPanel("seller");
   }, [startSetup]);
   useEffect(() => {
-    const open = () => setComposer(true);
+    const open = () => setPanel("draft");
     window.addEventListener("kharcha-new-invoice", open);
     return () => window.removeEventListener("kharcha-new-invoice", open);
   }, []);
@@ -40,38 +38,23 @@ export function InvoiceDesk({ projectId, currency, startSetup = false }: { proje
   if (q.isPending) return <p className="text-sm text-muted-foreground">Loading invoices…</p>;
   if (!q.data) return <p className="text-sm text-expense">Couldn't load invoices.</p>;
   const data = q.data;
-  const setupMissing = !data.seller.stateCode || !data.seller.gstin;
+  const sellerState = INDIA_STATES.find((state) => state.code === data.seller.stateCode)?.name;
+  const quiet = data.invoices.length === 0 && isZero(data.aging.receivable);
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-3 gap-2">
-        <Stat label="Sales to collect" value={formatMoney(data.aging.receivable, currency, { compact: true })} />
-        <Stat label="Overdue" value={formatMoney(data.aging.d30, currency, { compact: true })} />
-        <Stat label="Older" value={formatMoney(data.aging.d60, currency, { compact: true })} />
-      </div>
-      {setupMissing && !setup && (
-        <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2">
-          <p className="text-sm">Complete invoice details</p>
-          <Button type="button" variant="secondary" className="h-9" onClick={() => setSetup(true)}>Finish setup</Button>
+      {!quiet && (
+        <div className="grid grid-cols-3 gap-2">
+          <Stat label="To collect" value={formatMoney(data.aging.receivable, currency, { compact: true })} />
+          <Stat label="Overdue" value={formatMoney(data.aging.d30, currency, { compact: true })} />
+          <Stat label="Older" value={formatMoney(data.aging.d60, currency, { compact: true })} />
         </div>
       )}
-      {setup && <SellerForm projectId={projectId} seller={data.seller} onSaved={async () => { await reload(); setSetup(false); }} />}
-      {!setup && (
-        <button type="button" className="text-sm text-muted-foreground underline" onClick={() => setSetup(true)}>Invoice details</button>
+      {quiet && panel === "none" && (
+        <div className="rounded-xl bg-card px-4 py-4">
+          <p className="font-medium">No sales yet</p>
+          <p className="mt-1 text-sm text-muted-foreground">Issue an invoice when someone owes you. A draft does not change the books.</p>
+        </div>
       )}
-      <div className="flex gap-2">
-        <Button type="button" variant="secondary" className="h-11" onClick={() => setCustomersOpen((value) => !value)}>{data.customers.length === 0 ? "Add customer" : "Customers"}</Button>
-      </div>
-      {data.customers.length === 0 && !customersOpen && (
-        <p className="text-sm text-muted-foreground">No customers yet. They show up here when you add them.</p>
-      )}
-      {data.customers.length > 0 && !customersOpen && (
-        <p className="text-sm text-muted-foreground">{data.customers.length} customer{data.customers.length === 1 ? "" : "s"}</p>
-      )}
-      {customersOpen && <CustomerForm projectId={projectId} onSaved={reload} />}
-      {composer && (
-        <DraftForm projectId={projectId} today={today} customers={data.customers} sellerState={data.seller.stateCode} onSaved={reload} />
-      )}
-      {data.invoices.length === 0 && <p className="text-sm text-muted-foreground">No invoices yet. A draft does not change the books until you issue it.</p>}
       {data.invoices.map((invoice) => (
         <article key={invoice.id} className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
           <div className="flex items-baseline justify-between gap-3">
@@ -128,6 +111,43 @@ export function InvoiceDesk({ projectId, currency, startSetup = false }: { proje
           )}
         </article>
       ))}
+      {panel === "draft" && (
+        <DraftForm
+          projectId={projectId}
+          today={today}
+          customers={data.customers}
+          sellerState={data.seller.stateCode}
+          onSaved={async () => { await reload(); setPanel("none"); }}
+          onClose={() => setPanel("none")}
+        />
+      )}
+      {panel === "seller" && (
+        <SellerForm projectId={projectId} seller={data.seller} onSaved={async () => { await reload(); setPanel("none"); }} onClose={() => setPanel("none")} />
+      )}
+      {panel === "customer" && (
+        <CustomerForm projectId={projectId} onSaved={async () => { await reload(); setPanel("none"); }} onClose={() => setPanel("none")} />
+      )}
+      {panel === "none" && (
+        <>
+          <Button type="button" className="h-11" onClick={() => setPanel("draft")}>Create invoice</Button>
+          <div className="overflow-hidden rounded-xl bg-card">
+            <button type="button" className="flex min-h-14 w-full items-center justify-between gap-3 border-b border-border/50 px-3 text-left" onClick={() => setPanel("seller")}>
+              <span>
+                <span className="block text-sm font-medium">Seller</span>
+                <span className="block text-xs text-muted-foreground">{sellerState || "Add your state"}{data.seller.gstin ? ` · ${data.seller.gstin}` : ""}</span>
+              </span>
+              <span className="text-muted-foreground" aria-hidden="true">›</span>
+            </button>
+            <button type="button" className="flex min-h-14 w-full items-center justify-between gap-3 px-3 text-left" onClick={() => setPanel("customer")}>
+              <span>
+                <span className="block text-sm font-medium">Customers</span>
+                <span className="block text-xs text-muted-foreground">{data.customers.length === 0 ? "None yet" : `${data.customers.length} saved`}</span>
+              </span>
+              <span className="text-muted-foreground" aria-hidden="true">›</span>
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -145,10 +165,12 @@ function SellerForm({
   projectId,
   seller,
   onSaved,
+  onClose,
 }: {
   projectId: string;
   seller: { legalName: string; stateCode: string | null; gstin: string | null; pan: string | null };
   onSaved: () => Promise<void>;
+  onClose: () => void;
 }) {
   const [stateCode, setStateCode] = useState(seller.stateCode || "MH");
   const [gstin, setGstin] = useState(seller.gstin || "");
@@ -177,11 +199,12 @@ function SellerForm({
       <Label htmlFor="gstin">GSTIN</Label>
       <Input id="gstin" value={gstin} onChange={(event) => setGstin(event.target.value)} />
       <Button type="submit" variant="secondary">Save seller</Button>
+      <button type="button" className="h-11 text-sm text-muted-foreground" onClick={onClose}>Cancel</button>
     </form>
   );
 }
 
-function CustomerForm({ projectId, onSaved }: { projectId: string; onSaved: () => Promise<void> }) {
+function CustomerForm({ projectId, onSaved, onClose }: { projectId: string; onSaved: () => Promise<void>; onClose: () => void }) {
   const [name, setName] = useState("");
   const [stateCode, setStateCode] = useState("MH");
   return (
@@ -209,6 +232,7 @@ function CustomerForm({ projectId, onSaved }: { projectId: string; onSaved: () =
         ))}
       </select>
       <Button type="submit" variant="secondary">Add customer</Button>
+      <button type="button" className="h-11 text-sm text-muted-foreground" onClick={onClose}>Cancel</button>
     </form>
   );
 }
@@ -219,15 +243,18 @@ function DraftForm({
   customers,
   sellerState,
   onSaved,
+  onClose,
 }: {
   projectId: string;
   today: string;
   customers: { id: string; name: string; state_code: string | null }[];
   sellerState: string | null;
   onSaved: () => Promise<void>;
+  onClose: () => void;
 }) {
   const [customerId, setCustomerId] = useState(customers[0]?.id ?? "");
-  const [description, setDescription] = useState("Software Development");
+  const [customerName, setCustomerName] = useState("");
+  const [description, setDescription] = useState("");
   const [rate, setRate] = useState("");
   const [gstRate, setGstRate] = useState(18);
   const [place, setPlace] = useState(sellerState || "MH");
@@ -238,13 +265,21 @@ function DraftForm({
       onSubmit={async (event) => {
         event.preventDefault();
         try {
+          let id = customerId;
+          if (!id) {
+            const name = customerName.trim();
+            if (!name) throw new Error("Who is this invoice for?");
+            const created = await saveBusinessCustomer({ data: { projectId, name, stateCode: place } });
+            id = created?.id || "";
+          }
+          if (!id) throw new Error("Couldn't add that customer");
           const saved = await saveBusinessDraft({
             data: {
               projectId,
-              customerId,
+              customerId: id,
               issueDate: today,
               placeOfSupply: place,
-              items: [{ description, quantity: "1", rate, gstRate, revenueCode: "4100" }],
+              items: [{ description: description.trim() || "Services", quantity: "1", rate, gstRate, revenueCode: "4100" }],
             },
           });
           toast.success(saved?.treatment === "incomplete" ? "Draft saved. Add state before you issue it." : `Draft saved. ${saved?.treatment === "inter" ? "IGST" : "CGST + SGST"} calculated. Not posted yet.`);
@@ -254,13 +289,36 @@ function DraftForm({
         }
       }}
     >
-      <p className="text-sm font-medium">New draft</p>
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm font-medium">New invoice</p>
+        <button type="button" className="text-sm text-muted-foreground" onClick={onClose}>Cancel</button>
+      </div>
       <p className="text-sm text-muted-foreground">Nothing hits the books until you issue it.</p>
-      <Label>Customer</Label>
-      <select className="h-11 rounded-md bg-secondary px-3" value={customerId} onChange={(event) => setCustomerId(event.target.value)}>
-        {customers.length === 0 && <option value="">Add a customer first</option>}
-        {customers.map((customer) => (
-          <option key={customer.id} value={customer.id}>{customer.name}</option>
+      <Label htmlFor="desc">What is it</Label>
+      <Input id="desc" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Design, software, consulting" />
+      <Label htmlFor="rate">Amount</Label>
+      <Input id="rate" inputMode="decimal" value={rate} onChange={(event) => setRate(event.target.value)} placeholder="0" />
+      {customers.length > 0 ? (
+        <>
+          <Label>Customer</Label>
+          <select className="h-11 rounded-md bg-secondary px-3" value={customerId} onChange={(event) => setCustomerId(event.target.value)}>
+            {customers.map((customer) => (
+              <option key={customer.id} value={customer.id}>{customer.name}</option>
+            ))}
+            <option value="">Someone new</option>
+          </select>
+        </>
+      ) : null}
+      {!customerId && (
+        <>
+          <Label htmlFor="cname">Customer</Label>
+          <Input id="cname" value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Name" />
+        </>
+      )}
+      <Label>GST %</Label>
+      <select className="h-11 rounded-md bg-secondary px-3" value={gstRate} onChange={(event) => setGstRate(Number(event.target.value))}>
+        {[0, 5, 12, 18, 28].map((rateOption) => (
+          <option key={rateOption} value={rateOption}>{rateOption}</option>
         ))}
       </select>
       <Label>Place of supply</Label>
@@ -269,17 +327,7 @@ function DraftForm({
           <option key={state.code} value={state.code}>{state.name}</option>
         ))}
       </select>
-      <Label htmlFor="desc">Description</Label>
-      <Input id="desc" value={description} onChange={(event) => setDescription(event.target.value)} />
-      <Label htmlFor="rate">Rate</Label>
-      <Input id="rate" inputMode="decimal" value={rate} onChange={(event) => setRate(event.target.value)} />
-      <Label>GST %</Label>
-      <select className="h-11 rounded-md bg-secondary px-3" value={gstRate} onChange={(event) => setGstRate(Number(event.target.value))}>
-        {[0, 5, 12, 18, 28].map((rateOption) => (
-          <option key={rateOption} value={rateOption}>{rateOption}</option>
-        ))}
-      </select>
-      <Button type="submit">Save draft</Button>
+      <Button type="submit" className="h-11">Save draft</Button>
     </form>
   );
 }
