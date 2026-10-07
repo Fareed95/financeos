@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { API_ROUTES } from "@/lib/api-routes";
 import { SCOPES, createBusinessApiKey, getBusiness, listBusinessApiLogs, revokeBusinessApiKey, rotateBusinessApiKey } from "@/lib/server/business";
-import { disableWebhook, rotateWebhookSecret, saveWebhookEndpoint, webhookDesk } from "@/lib/server/ops";
+import { disableWebhook, rotateWebhookSecret, saveWebhookEndpoint, sendTestWebhook, webhookDesk } from "@/lib/server/ops";
 import { todayISO } from "@/lib/utils";
 
 const GROUPS: { label: string; scopes: string[] }[] = [
@@ -215,12 +215,50 @@ function Logs({ projectId }: { projectId: string }) {
 function WebhookPanel({ projectId }: { projectId: string }) {
   const [url, setUrl] = useState("");
   const [secret, setSecret] = useState("");
+  const [verify, setVerify] = useState<"node" | "python" | "php">("node");
+  const [result, setResult] = useState("");
   const desk = useQuery({ queryKey: ["webhooks", projectId], queryFn: () => webhookDesk({ data: { projectId } }) });
+  const samples = {
+    node: `import { createHmac, timingSafeEqual } from "node:crypto";
+
+function verify(secret, rawBody, header, timestamp) {
+  const expected = "sha256=" + createHmac("sha256", secret).update(timestamp + "." + rawBody).digest("hex");
+  const a = Buffer.from(expected);
+  const b = Buffer.from(header);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// Use the raw request bytes. Do not JSON.parse and stringify again.`,
+    python: `import hashlib, hmac
+
+def verify(secret: str, raw_body: bytes, header: str, timestamp: str) -> bool:
+    signed = timestamp.encode() + b"." + raw_body
+    expected = "sha256=" + hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, header)
+
+# raw_body is the exact HTTP body. Do not re-serialize parsed JSON.`,
+    php: `function verify(string $secret, string $rawBody, string $header, string $timestamp): bool {
+  $expected = "sha256=" . hash_hmac("sha256", $timestamp . "." . $rawBody, $secret);
+  return hash_equals($expected, $header);
+}
+
+// $rawBody is php://input, not json_encode(json_decode($rawBody)).`,
+  };
   return (
     <div className="space-y-3">
       <section className="rounded-xl bg-card p-4">
+        <h2 className="text-sm font-medium">Learn how to verify</h2>
+        <p className="mt-2 text-sm text-muted-foreground">The signed payload is the timestamp, a dot, then the raw HTTP body. The signature is HMAC-SHA256 of that string. The header is X-Kharcha-Signature: sha256= plus the hex. Also sent: X-Kharcha-Event, X-Kharcha-Delivery, and X-Kharcha-Timestamp. The body has an event id and a type. Reject timestamps older than five minutes, and deduplicate by event id. The event id stays the same on every retry. The delivery id is the same row for those retries; the attempt count goes up. The API key is never in the body.</p>
+        <div className="mt-3 flex gap-2">
+          {(["node", "python", "php"] as const).map((item) => (
+            <button key={item} type="button" className={`h-9 rounded-full px-3 text-xs ${verify === item ? "bg-foreground text-background" : "bg-secondary"}`} onClick={() => setVerify(item)}>{item === "node" ? "Node.js" : item === "python" ? "Python" : "PHP"}</button>
+          ))}
+        </div>
+        <pre className="mt-3 overflow-x-auto rounded-md bg-secondary p-3 text-xs">{samples[verify]}</pre>
+      </section>
+      <section className="rounded-xl bg-card p-4">
         <h2 className="text-sm font-medium">Webhooks</h2>
-        <p className="mt-2 text-sm text-muted-foreground">Kharcha POSTs JSON to an https URL. The signature is HMAC-SHA256 of timestamp + a dot + the raw body. Header X-Kharcha-Signature is sha256= and the hex digest. Retries wait 1, 5, 30, then 120 minutes, then stop. The event id stays the same. The secret is shown once and is not written to the audit log.</p>
+        <p className="mt-2 text-sm text-muted-foreground">Kharcha tries delivery when the event is created. If that fails, the server retries after about 1, 5, 30, and 120 minutes. Those retries run from the scheduled job, not because someone opened this page. The job only runs where the host cron secret is configured. The secret is shown once and is not written to the audit log.</p>
         <form className="mt-3 grid gap-2" onSubmit={async (event) => {
           event.preventDefault();
           const saved = await saveWebhookEndpoint({ data: { projectId, url, events: ["invoice.issued", "invoice.paid", "bill.created", "bill.paid", "payment.created"] } });
@@ -237,10 +275,22 @@ function WebhookPanel({ projectId }: { projectId: string }) {
         <article key={endpoint.id} className="rounded-xl bg-card p-4 text-sm">
           <p className="break-all">{endpoint.url}</p>
           <p className="text-muted-foreground">{endpoint.status} · {endpoint.events}</p>
-          <div className="mt-2 flex gap-2">
-            <Button type="button" variant="secondary" className="h-9" onClick={async () => { const next = await rotateWebhookSecret({ data: { projectId, id: endpoint.id } }); setSecret(next?.secret || ""); await desk.refetch(); }}>Rotate secret</Button>
-            <Button type="button" variant="ghost" className="h-9" onClick={async () => { await disableWebhook({ data: { projectId, id: endpoint.id } }); await desk.refetch(); }}>Disable</Button>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button type="button" variant="secondary" className="h-11" onClick={async () => {
+              const sent = await sendTestWebhook({ data: { projectId, endpointId: endpoint.id } });
+              setResult(sent ? `${sent.status} · HTTP ${sent.http} · ${sent.durationMs} ms · attempt ${sent.attempts}` : "No result");
+              await desk.refetch();
+            }}>Send test event</Button>
+            <Button type="button" variant="secondary" className="h-11" onClick={async () => { const next = await rotateWebhookSecret({ data: { projectId, id: endpoint.id } }); setSecret(next?.secret || ""); await desk.refetch(); }}>Rotate secret</Button>
+            <Button type="button" variant="ghost" className="h-11" onClick={async () => { await disableWebhook({ data: { projectId, id: endpoint.id } }); await desk.refetch(); }}>Disable</Button>
           </div>
+        </article>
+      ))}
+      {result && <p className="text-sm">{result}</p>}
+      {(desk.data?.deliveries ?? []).map((delivery) => (
+        <article key={delivery.id} className="rounded-xl bg-card p-4 text-sm">
+          <p>{delivery.event} · {delivery.status === "retry" ? "Retrying" : delivery.status === "delivered" ? "Delivered" : delivery.status === "failed" ? "Failed" : delivery.status}</p>
+          <p className="text-muted-foreground">HTTP {delivery.http_status ?? "—"} · {delivery.duration_ms ?? "—"} ms · attempt {delivery.attempts}</p>
         </article>
       ))}
     </div>

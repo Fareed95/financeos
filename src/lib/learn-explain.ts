@@ -40,6 +40,7 @@ export type LearnSnapshot = {
   holders: HolderFact[];
   change?: { explained: boolean; delta: string; parts: { label: string; amount: string }[] } | null;
   runwayNote?: string | null;
+  reimbursement?: string | null;
 };
 
 export type ExplainRow = { label: string; value: string };
@@ -225,6 +226,22 @@ export function hypotheticalValuation(): ExplainBlock {
   };
 }
 
+export function explainPurchaseBill(input: { name: string; currency: string; taxable: string; total: string; paid: string }) {
+  const gst = subMoney(input.total, input.taxable);
+  const owed = subMoney(input.total, input.paid);
+  return {
+    heading: `Bill from ${input.name}`,
+    body: `${money(input.taxable, input.currency)} is the business expense. ${money(gst, input.currency)} is input GST tracked separately. It is not called a guaranteed tax credit. ${money(input.total, input.currency)} is the total owed. Cash does not move until a payment is recorded. After a payment, what remains is ${money(owed, input.currency)}.`,
+    rows: [
+      { label: "Expense", value: money(input.taxable, input.currency) },
+      { label: "Input GST tracked", value: money(gst, input.currency) },
+      { label: "Total owed", value: money(input.total, input.currency) },
+      { label: "Paid", value: money(input.paid, input.currency) },
+      { label: "Still to pay", value: money(owed, input.currency) },
+    ],
+  };
+}
+
 export function explainChange(snapshot: LearnSnapshot): ExplainBlock {
   if (!snapshot.change) {
     return { heading: "Why did this change?", body: "A previous period is not loaded, so Kharcha will not guess a cause." };
@@ -239,6 +256,32 @@ export function explainChange(snapshot: LearnSnapshot): ExplainBlock {
   };
 }
 
+export function explainPersonal(snapshot: LearnSnapshot): ExplainBlock {
+  const due = snapshot.reimbursement;
+  if (!due || isZero(due)) {
+    return {
+      heading: "Paid personally",
+      body: "If someone uses their own money for a business expense, the business owes that person the amount they paid. It does not change who owns the company.",
+    };
+  }
+  return {
+    heading: "Paid personally",
+    body: `${snapshot.name} owes ${money(due, snapshot.currency)} back to team members who paid business expenses themselves. Returning that money is not a second expense, and it does not change ownership.`,
+    rows: [{ label: "To reimburse", value: money(due, snapshot.currency) }],
+  };
+}
+
+export function explainKeptProfit(snapshot: LearnSnapshot): ExplainBlock {
+  return {
+    heading: "Profit kept in the business",
+    body: `Profit does not move into personal accounts on its own. ${snapshot.name}'s result this period is ${money(snapshot.netProfit, snapshot.currency)}. Unless you deliberately take money out, it stays in the business. In accounting this leftover result is retained earnings.`,
+    rows: [
+      { label: "Profit this period", value: money(snapshot.netProfit, snapshot.currency) },
+      { label: "Cash available", value: money(snapshot.cash, snapshot.currency) },
+    ],
+  };
+}
+
 export function blocksFor(page: string, snapshot: LearnSnapshot): ExplainBlock[] {
   if (page === "home") return [explainCapital(snapshot), explainProfitWaterfall(snapshot), explainEbitda(snapshot), ...explainCashVersusProfit(snapshot), explainChange(snapshot)];
   if (page === "invoices") {
@@ -250,19 +293,21 @@ export function blocksFor(page: string, snapshot: LearnSnapshot): ExplainBlock[]
       { heading: "Input tax credit", body: "Kharcha does not calculate input tax credit. GST collected is not reduced by purchase GST unless a credit has actually been recorded, and this app does not record that credit." },
     ];
   }
-  if (page === "expenses") {
+  if (page === "expenses" || page === "reimbursements") {
     return [
+      explainPersonal(snapshot),
+      explainKeptProfit(snapshot),
       explainProfitWaterfall(snapshot),
       {
         heading: "Money to pay",
         body: isZero(snapshot.payable)
-          ? "No accounts payable balance is recorded. Kharcha will not invent vendor bills."
-          : `Vendors are owed ${money(snapshot.payable, snapshot.currency)}.`,
-        rows: [{ label: "Accounts payable", value: money(snapshot.payable, snapshot.currency) }],
+          ? "No vendor bills are waiting. Money owed back to the team is separate from vendor bills."
+          : `Vendors are owed ${money(snapshot.payable, snapshot.currency)}. That is not the same as reimbursing the team.`,
+        rows: [{ label: "Vendor bills", value: money(snapshot.payable, snapshot.currency) }],
       },
     ];
   }
-  if (page === "reports") return [explainProfitWaterfall(snapshot), explainEbitda(snapshot), explainBalanceSheet(snapshot), explainCashFlow(snapshot)];
+  if (page === "reports") return [explainProfitWaterfall(snapshot), explainEbitda(snapshot), explainBalanceSheet(snapshot), explainCashFlow(snapshot), explainKeptProfit(snapshot)];
   if (page === "equity") return [explainOwnership(snapshot), hypotheticalDilution(), hypotheticalValuation()];
   if (page === "team") {
     return [

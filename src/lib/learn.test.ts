@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { searchConcepts } from "./learn.ts";
-import { explainCapital, explainOneInvoice, type LearnSnapshot } from "./learn-explain.ts";
+import { explainCapital, explainOneInvoice, explainPurchaseBill, type LearnSnapshot } from "./learn-explain.ts";
 
 function snapshot(over: Partial<LearnSnapshot> = {}): LearnSnapshot {
   return {
@@ -77,6 +77,19 @@ test("a 59000 invoice explains taxable, GST, cash, and the balance after a parti
   assert.match(later, /Revenue \(taxable\).*₹50,000/);
   assert.match(later, /Cash received.*₹20,000/);
   assert.match(later, /Still to collect.*₹39,000/);
+});
+
+test("an AWS bill explains expense, tracked input GST, and the unpaid balance", () => {
+  const unpaid = explainPurchaseBill({ name: "AWS India", currency: "INR", taxable: "10000.00", total: "11800.00", paid: "0.00" });
+  assert.match(unpaid.body, /₹10,000/);
+  assert.match(unpaid.body, /₹1,800/);
+  assert.match(unpaid.body, /input GST tracked separately/i);
+  assert.match(unpaid.body, /not called a guaranteed tax credit/i);
+  assert.match(unpaid.body, /₹11,800/);
+  assert.match(unpaid.body, /Cash does not move/);
+  assert.doesNotMatch(unpaid.body, /claimable|you can claim/i);
+  const partial = explainPurchaseBill({ name: "AWS India", currency: "INR", taxable: "10000.00", total: "11800.00", paid: "5000.00" });
+  assert.match(partial.body, /₹6,800/);
 });
 
 test("glossary search finds receivable and valuation without the accounting name", () => {

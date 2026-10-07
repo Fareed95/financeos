@@ -1,6 +1,6 @@
-import type { Sql } from "@/lib/db";
-import { webhookRetryDelayMs } from "@/lib/ops";
-import { webhookSignature } from "@/lib/webhook-sign";
+import type { Sql } from "../db.ts";
+import { webhookRetryDelayMs } from "../ops.ts";
+import { webhookSignature } from "../webhook-sign.ts";
 
 export const WEBHOOK_EVENTS = [
   "invoice.created",
@@ -55,7 +55,7 @@ async function attemptDelivery(
   attempt: number,
 ) {
   const timestamp = String(Math.floor(Date.now() / 1000));
-  const signature = webhookSignature(secret, timestamp, payload);
+  const signature = await webhookSignature(secret, timestamp, payload);
   const started = Date.now();
   let status = 0;
   let summary = "";
@@ -94,6 +94,11 @@ async function attemptDelivery(
 }
 
 export async function retryDueWebhooks(sql: Sql, businessId: string) {
+  await sql`
+    update biz_webhook_deliveries
+    set status = 'retry'
+    where business_id = ${businessId} and status = 'delivering' and next_retry_at is not null and next_retry_at <= now()
+  `;
   const due = await sql<{
     id: string;
     event: string;
@@ -110,7 +115,46 @@ export async function retryDueWebhooks(sql: Sql, businessId: string) {
     where d.business_id = ${businessId} and d.status = 'retry' and d.next_retry_at <= now() and d.attempts < ${MAX_ATTEMPTS}
   `;
   for (const row of due) {
-    if (row.endpoint_status !== "active" || !row.url.startsWith("https://") || !row.payload || !row.event_id) continue;
+    const claimed = await sql<{ id: string }>`
+      update biz_webhook_deliveries
+      set status = 'delivering', next_retry_at = now() + interval '2 minutes'
+      where id = ${row.id} and business_id = ${businessId} and status = 'retry' and next_retry_at <= now() and attempts < ${MAX_ATTEMPTS}
+      returning id
+    `;
+    if (!claimed[0]) continue;
+    if (row.endpoint_status !== "active" || !row.url.startsWith("https://") || !row.payload || !row.event_id) {
+      await sql`
+        update biz_webhook_deliveries set status = 'failed', response_summary = 'Endpoint is not active'
+        where id = ${row.id}
+      `;
+      continue;
+    }
     await attemptDelivery(sql, row.id, row.url, row.secret, row.event, row.event_id, row.payload, row.attempts);
   }
+}
+
+export async function deliverTestPing(
+  sql: Sql,
+  businessId: string,
+  endpoint: { id: string; url: string; secret: string },
+) {
+  const eventId = crypto.randomUUID();
+  const deliveryId = crypto.randomUUID();
+  const payload = JSON.stringify({ id: eventId, type: "test.ping", data: { ok: true } });
+  await sql`
+    insert into biz_webhook_deliveries (id, business_id, event, status, attempts, event_id, endpoint_id, payload, environment)
+    values (${deliveryId}, ${businessId}, 'test.ping', 'pending', 0, ${eventId}, ${endpoint.id}, ${payload}, 'live')
+  `;
+  await attemptDelivery(sql, deliveryId, endpoint.url, endpoint.secret, "test.ping", eventId, payload, 0);
+  const rows = await sql<{ status: string; http_status: number | null; duration_ms: number | null; attempts: number }>`
+    select status, http_status, duration_ms, attempts from biz_webhook_deliveries where id = ${deliveryId}
+  `;
+  const row = rows[0];
+  return {
+    status: row?.status === "delivered" ? "delivered" : row?.status === "retry" ? "retrying" : "failed",
+    http: row?.http_status ?? 0,
+    durationMs: row?.duration_ms ?? 0,
+    attempts: row?.attempts ?? 1,
+    eventId,
+  };
 }

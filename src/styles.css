@@ -246,8 +246,15 @@ html {
   transform: translateY(110%);
 }
 
-.fos-tabbar {
-  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+html[data-business="1"] .fos-tabbar {
+  background: color-mix(in oklab, var(--background) 88%, transparent);
+}
+html[data-business="1"] .fos-tabbar a {
+  height: 3rem;
+  opacity: 0.62;
+}
+html[data-business="1"] .fos-tabbar a.text-foreground {
+  opacity: 0.9;
 }
 
 .fos-composer {

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -18,10 +18,21 @@ import {
 } from "@/lib/server/invoices";
 import { todayISO } from "@/lib/utils";
 
-export function InvoiceDesk({ projectId, currency }: { projectId: string; currency: string }) {
+export function InvoiceDesk({ projectId, currency, startSetup = false }: { projectId: string; currency: string; startSetup?: boolean }) {
   const today = todayISO();
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["invoices", projectId, today], queryFn: () => getInvoiceDesk({ data: { projectId, today } }) });
+  const [setup, setSetup] = useState(startSetup);
+  const [customersOpen, setCustomersOpen] = useState(false);
+  const [composer, setComposer] = useState(false);
+  useEffect(() => {
+    if (startSetup) setSetup(true);
+  }, [startSetup]);
+  useEffect(() => {
+    const open = () => setComposer(true);
+    window.addEventListener("kharcha-new-invoice", open);
+    return () => window.removeEventListener("kharcha-new-invoice", open);
+  }, []);
   async function reload() {
     await qc.invalidateQueries({ queryKey: ["invoices", projectId] });
     await qc.invalidateQueries({ queryKey: ["business", projectId] });
@@ -29,17 +40,38 @@ export function InvoiceDesk({ projectId, currency }: { projectId: string; curren
   if (q.isPending) return <p className="text-sm text-muted-foreground">Loading invoices…</p>;
   if (!q.data) return <p className="text-sm text-expense">Couldn't load invoices.</p>;
   const data = q.data;
+  const setupMissing = !data.seller.stateCode || !data.seller.gstin;
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-        <Stat label="Receivable" value={formatMoney(data.aging.receivable, currency)} />
-        <Stat label="Current" value={formatMoney(data.aging.current, currency)} />
-        <Stat label="1–30 overdue" value={formatMoney(data.aging.d30, currency)} />
-        <Stat label="31+ overdue" value={formatMoney(data.aging.d60, currency)} />
+      <div className="grid grid-cols-3 gap-2">
+        <Stat label="Sales to collect" value={formatMoney(data.aging.receivable, currency, { compact: true })} />
+        <Stat label="Overdue" value={formatMoney(data.aging.d30, currency, { compact: true })} />
+        <Stat label="Older" value={formatMoney(data.aging.d60, currency, { compact: true })} />
       </div>
-      <SellerForm projectId={projectId} seller={data.seller} onSaved={reload} />
-      <CustomerForm projectId={projectId} onSaved={reload} />
-      <DraftForm projectId={projectId} today={today} customers={data.customers} sellerState={data.seller.stateCode} onSaved={reload} />
+      {setupMissing && !setup && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2">
+          <p className="text-sm">Complete invoice details</p>
+          <Button type="button" variant="secondary" className="h-9" onClick={() => setSetup(true)}>Finish setup</Button>
+        </div>
+      )}
+      {setup && <SellerForm projectId={projectId} seller={data.seller} onSaved={async () => { await reload(); setSetup(false); }} />}
+      {!setup && (
+        <button type="button" className="text-sm text-muted-foreground underline" onClick={() => setSetup(true)}>Invoice details</button>
+      )}
+      <div className="flex gap-2">
+        <Button type="button" variant="secondary" className="h-11" onClick={() => setCustomersOpen((value) => !value)}>{data.customers.length === 0 ? "Add customer" : "Customers"}</Button>
+      </div>
+      {data.customers.length === 0 && !customersOpen && (
+        <p className="text-sm text-muted-foreground">No customers yet. They show up here when you add them.</p>
+      )}
+      {data.customers.length > 0 && !customersOpen && (
+        <p className="text-sm text-muted-foreground">{data.customers.length} customer{data.customers.length === 1 ? "" : "s"}</p>
+      )}
+      {customersOpen && <CustomerForm projectId={projectId} onSaved={reload} />}
+      {composer && (
+        <DraftForm projectId={projectId} today={today} customers={data.customers} sellerState={data.seller.stateCode} onSaved={reload} />
+      )}
+      {data.invoices.length === 0 && <p className="text-sm text-muted-foreground">No invoices yet. A draft does not change the books until you issue it.</p>}
       {data.invoices.map((invoice) => (
         <article key={invoice.id} className="rounded-xl bg-card p-4 shadow-[var(--elev-shadow)]">
           <div className="flex items-baseline justify-between gap-3">
@@ -102,9 +134,9 @@ export function InvoiceDesk({ projectId, currency }: { projectId: string; curren
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl bg-card p-4">
-      <p className="text-[11px] tracking-wide text-muted-foreground uppercase">{label}</p>
-      <p className="mt-1 font-display text-xl tabular">{value}</p>
+    <div className="min-w-0 rounded-lg border border-border/70 px-3 py-2">
+      <p className="text-[11px] text-muted-foreground">{label}</p>
+      <p className="mt-0.5 text-base font-medium tabular">{value}</p>
     </div>
   );
 }
@@ -201,6 +233,7 @@ function DraftForm({
   const [place, setPlace] = useState(sellerState || "MH");
   return (
     <form
+      id="new-invoice"
       className="grid gap-3 rounded-xl bg-card p-4"
       onSubmit={async (event) => {
         event.preventDefault();

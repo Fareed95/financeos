@@ -29,6 +29,7 @@ import { Route as AppAccountsIdRouteImport } from './routes/_app/accounts/$id'
 import { Route as AppProjectsIndexRouteImport } from './routes/_app/projects/index'
 import { Route as AppProjectsIdRouteImport } from './routes/_app/projects/$id'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
+import { Route as ApiCronWebhooksRouteImport } from './routes/api/cron/webhooks'
 import { Route as ApiV1SplatRouteImport } from './routes/api/v1/$'
 
 const AppRoute = AppRouteImport.update({
@@ -130,6 +131,11 @@ const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
   path: '/api/auth/$',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiCronWebhooksRoute = ApiCronWebhooksRouteImport.update({
+  id: '/api/cron/webhooks',
+  path: '/api/cron/webhooks',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiV1SplatRoute = ApiV1SplatRouteImport.update({
   id: '/api/v1/$',
   path: '/api/v1/$',
@@ -154,6 +160,7 @@ export interface FileRoutesByFullPath {
   '/accounts/$id': typeof AppAccountsIdRoute
   '/projects/$id': typeof AppProjectsIdRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/cron/webhooks': typeof ApiCronWebhooksRoute
   '/api/v1/$': typeof ApiV1SplatRoute
   '/accounts/': typeof AppAccountsIndexRoute
   '/projects/': typeof AppProjectsIndexRoute
@@ -174,6 +181,7 @@ export interface FileRoutesByTo {
   '/accounts/$id': typeof AppAccountsIdRoute
   '/projects/$id': typeof AppProjectsIdRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/cron/webhooks': typeof ApiCronWebhooksRoute
   '/api/v1/$': typeof ApiV1SplatRoute
   '/accounts': typeof AppAccountsIndexRoute
   '/projects': typeof AppProjectsIndexRoute
@@ -198,6 +206,7 @@ export interface FileRoutesById {
   '/_app/accounts/$id': typeof AppAccountsIdRoute
   '/_app/projects/$id': typeof AppProjectsIdRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/cron/webhooks': typeof ApiCronWebhooksRoute
   '/api/v1/$': typeof ApiV1SplatRoute
   '/_app/accounts/': typeof AppAccountsIndexRoute
   '/_app/projects/': typeof AppProjectsIndexRoute
@@ -222,6 +231,7 @@ export interface FileRouteTypes {
     | '/accounts/$id'
     | '/projects/$id'
     | '/api/auth/$'
+    | '/api/cron/webhooks'
     | '/api/v1/$'
     | '/accounts/'
     | '/projects/'
@@ -242,6 +252,7 @@ export interface FileRouteTypes {
     | '/accounts/$id'
     | '/projects/$id'
     | '/api/auth/$'
+    | '/api/cron/webhooks'
     | '/api/v1/$'
     | '/accounts'
     | '/projects'
@@ -265,6 +276,7 @@ export interface FileRouteTypes {
     | '/_app/accounts/$id'
     | '/_app/projects/$id'
     | '/api/auth/$'
+    | '/api/cron/webhooks'
     | '/api/v1/$'
     | '/_app/accounts/'
     | '/_app/projects/'
@@ -277,6 +289,7 @@ export interface RootRouteChildren {
   InviteTokenRoute: typeof InviteTokenRoute
   SplitTokenRoute: typeof SplitTokenRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
+  ApiCronWebhooksRoute: typeof ApiCronWebhooksRoute
   ApiV1SplatRoute: typeof ApiV1SplatRoute
 }
 
@@ -422,6 +435,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiAuthSplatRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/cron/webhooks': {
+      id: '/api/cron/webhooks'
+      path: '/api/cron/webhooks'
+      fullPath: '/api/cron/webhooks'
+      preLoaderRoute: typeof ApiCronWebhooksRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/v1/$': {
       id: '/api/v1/$'
       path: '/api/v1/$'
@@ -495,6 +515,7 @@ const rootRouteChildren: RootRouteChildren = {
   InviteTokenRoute: InviteTokenRoute,
   SplitTokenRoute: SplitTokenRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
+  ApiCronWebhooksRoute: ApiCronWebhooksRoute,
   ApiV1SplatRoute: ApiV1SplatRoute,
 }
 export const routeTree = rootRouteImport

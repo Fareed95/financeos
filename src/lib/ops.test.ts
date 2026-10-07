@@ -163,7 +163,7 @@ test("aging, budgets, runway, and profit changes use only the numbers given", ()
   assert.equal(webhookRetryDelayMs(4), null);
 });
 
-test("permissions and API scopes reject viewers, members paying bills, and revoked keys", () => {
+test("permissions and API scopes reject viewers, members paying bills, and revoked keys", async () => {
   assert.equal(can("viewer", "manage_vendors"), false);
   assert.equal(can("viewer", "pay_bills"), false);
   assert.equal(can("member", "pay_bills"), false);
@@ -175,8 +175,8 @@ test("permissions and API scopes reject viewers, members paying bills, and revok
   assert.equal(can("attacker", "view_vendors"), false);
   assert.throws(() => assertScope(["invoices:read"], "bills:read"), /bills:read/);
   assert.equal(keyStatus({ revokedAt: "2026-10-01", expiresAt: null, now: Date.now() }), "revoked");
-  const signed = webhookSignature("secret", "100", "{\"ok\":true}");
-  assert.equal(webhookSignatureMatches("secret", "100", "{\"ok\":true}", signed.header), true);
-  assert.equal(webhookSignatureMatches("secret", "100", "{\"ok\":false}", signed.header), false);
+  const signed = await webhookSignature("secret", "100", "{\"ok\":true}");
+  assert.equal(await webhookSignatureMatches("secret", "100", "{\"ok\":true}", signed.header), true);
+  assert.equal(await webhookSignatureMatches("secret", "100", "{\"ok\":false}", signed.header), false);
   assert.match(signed.header, /^sha256=[0-9a-f]{64}$/);
 });

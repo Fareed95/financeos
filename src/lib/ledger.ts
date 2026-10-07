@@ -39,6 +39,7 @@ export const CHART: LedgerAccount[] = [
   { code: "2230", name: "IGST Payable", type: "liability", subtype: "tax", cash: false },
   { code: "2300", name: "Loans Payable", type: "liability", subtype: "loan", cash: false },
   { code: "2400", name: "Accrued Expenses", type: "liability", subtype: "accrued", cash: false },
+  { code: "2500", name: "Due to team members", type: "liability", subtype: "reimbursement", cash: false },
   { code: "3000", name: "Share Capital", type: "equity", subtype: "capital", cash: false },
   { code: "3100", name: "Additional Paid-in Capital", type: "equity", subtype: "apic", cash: false },
   { code: "3200", name: "Retained Earnings", type: "equity", subtype: "retained", cash: false },

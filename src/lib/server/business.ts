@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import type { Sql } from "@/lib/db";
-import { ownership, type Holder } from "@/lib/cap-table";
+import { ownership, type Holder, type Ownership } from "@/lib/cap-table";
 import {
   CHART,
   assertBalanced,
@@ -12,6 +12,7 @@ import {
 import { fromCents, parseMoney, toCents } from "@/lib/money";
 import { assertOpeningAllowed, can, periodRange, planStartingMoney, type BizPermission } from "@/lib/biz-access";
 import { previousWindow, recentMonthRanges, runwayFrom, whyProfitChanged } from "@/lib/ops";
+import { recordedDecision, buildOwnershipView, linkExistingHolder, type OwnershipPerson } from "@/lib/ownership-decision";
 import { ensureUser } from "@/lib/server/ensure";
 import { publicError } from "@/lib/utils";
 
@@ -142,6 +143,8 @@ export async function postJournal(
     sourceId: string | null;
     lines: DraftLine[];
     environment?: "live" | "test";
+    /** When set, a second poster of the same source is an error instead of a silent reuse. */
+    exclusive?: boolean;
   },
 ) {
   assertBalanced(input.lines);
@@ -152,16 +155,33 @@ export async function postJournal(
       where business_id = ${businessId} and source = ${input.source} and source_id = ${input.sourceId}
         and status = 'posted' and environment = ${environment}
     `;
-    if (dup[0]) return dup[0].id;
+    if (dup[0]) {
+      if (input.exclusive) throw new Error("That entry is already posted");
+      return dup[0].id;
+    }
   }
   const entryId = crypto.randomUUID();
-  await sql`
-    insert into journal_entries (id, business_id, entry_date, memo, source, source_id, status, created_by, environment)
-    values (
-      ${entryId}, ${businessId}, ${input.date}::date, ${input.memo}, ${input.source}, ${input.sourceId},
-      'draft', ${actorId}, ${environment}
-    )
-  `;
+  try {
+    await sql`
+      insert into journal_entries (id, business_id, entry_date, memo, source, source_id, status, created_by, environment)
+      values (
+        ${entryId}, ${businessId}, ${input.date}::date, ${input.memo}, ${input.source}, ${input.sourceId},
+        'posted', ${actorId}, ${environment}
+      )
+    `;
+  } catch (error) {
+    const text = String(error).toLowerCase();
+    if (input.sourceId && (text.includes("journal_source") || text.includes("duplicate") || text.includes("unique"))) {
+      if (input.exclusive) throw new Error("That entry is already posted");
+      const winner = await sql<{ id: string }>`
+        select id from journal_entries
+        where business_id = ${businessId} and source = ${input.source} and source_id = ${input.sourceId}
+          and status = 'posted' and environment = ${environment}
+      `;
+      if (winner[0]) return winner[0].id;
+    }
+    throw error;
+  }
   const ids = await accountIds(sql, businessId);
   for (const line of input.lines) {
     const accountId = ids.get(line.code);
@@ -182,7 +202,7 @@ export async function postJournal(
     await sql`delete from journal_entries where id = ${entryId}`;
     throw new Error("Journal does not balance");
   }
-  await sql`update journal_entries set status = 'posted' where id = ${entryId}`;
+  await sql`update journal_entries set status = 'posted' where id = ${entryId} and status = 'posted'`;
   await audit(sql, businessId, actorId, "journal.posted", "journal", entryId);
   return entryId;
 }
@@ -311,17 +331,28 @@ export async function issueShares(
   sql: Sql,
   actorId: string,
   businessId: string,
-  input: { holder: string; shares: number; amount?: string | null; date: string },
+  input: { holder: string; shares: number; amount?: string | null; date: string; linkUserId?: string | null },
 ) {
   const holder = input.holder.trim();
   if (!holder) throw new Error("Shareholder name is required");
   if (!Number.isInteger(input.shares) || input.shares <= 0) throw new Error("Shares must be a whole number");
+  const linkUserId = input.linkUserId?.trim() || null;
+  const linkKind = linkUserId ? await linkTarget(sql, businessId, linkUserId) : null;
   const id = crypto.randomUUID();
   const amount = input.amount?.trim() ? toCents(parseMoney(input.amount)) : 0n;
   await sql`
     insert into biz_equity_events (id, business_id, kind, holder, shares, amount, event_date)
     values (${id}, ${businessId}, 'issuance', ${holder}, ${input.shares}, ${amount ? fromCents(amount) : null}, ${input.date}::date)
   `;
+  if (linkKind === "owner") {
+    await sql`update businesses set owner_stakeholder_name = ${holder} where id = ${businessId}`;
+  }
+  if (linkKind === "member") {
+    await sql`
+      update biz_members set stakeholder_name = ${holder}
+      where business_id = ${businessId} and user_id = ${linkUserId} and status = 'active'
+    `;
+  }
   if (amount > 0n) {
     await postJournal(sql, actorId, businessId, {
       date: input.date,
@@ -335,7 +366,128 @@ export async function issueShares(
   return { id };
 }
 
-async function holdersOf(sql: Sql, businessId: string): Promise<Holder[]> {
+export async function linkStakeholder(
+  sql: Sql,
+  actorId: string,
+  businessId: string,
+  input: { holder: string; linkUserId: string },
+) {
+  const write = linkExistingHolder(input);
+  const holders = await holdersOf(sql, businessId);
+  if (!holders.some((holder) => holder.name === write.holder && holder.shares > 0n)) {
+    throw new Error("That shareholder has no shares yet. Issue shares instead.");
+  }
+  const kind = await linkTarget(sql, businessId, write.linkUserId);
+  await sql`
+    update biz_members set stakeholder_name = null
+    where business_id = ${businessId} and stakeholder_name = ${write.holder}
+  `;
+  await sql`
+    update businesses set owner_stakeholder_name = null
+    where id = ${businessId} and owner_stakeholder_name = ${write.holder}
+  `;
+  if (kind === "owner") {
+    await sql`update businesses set owner_stakeholder_name = ${write.holder} where id = ${businessId}`;
+  } else {
+    await sql`
+      update biz_members set stakeholder_name = ${write.holder}
+      where business_id = ${businessId} and user_id = ${write.linkUserId} and status = 'active'
+    `;
+  }
+  await audit(sql, businessId, actorId, "ownership.linked", "equity", write.linkUserId);
+  return { ok: true as const, shareEvents: write.shareEvents };
+}
+
+async function linkTarget(sql: Sql, businessId: string, userId: string) {
+  const owner = await sql<{ user_id: string }>`
+    select pr.user_id
+    from businesses b
+    join projects pr on pr.id = b.project_id
+    where b.id = ${businessId}
+  `;
+  if (owner[0]?.user_id === userId) return "owner" as const;
+  const member = await sql<{ id: string }>`
+    select id from biz_members
+    where business_id = ${businessId} and user_id = ${userId} and status = 'active'
+  `;
+  if (!member[0]) throw new Error("That person is not on this team");
+  return "member" as const;
+}
+
+function holderPosition(name: string | null, holders: Ownership[]) {
+  const cleaned = name?.trim() || "";
+  if (!cleaned) return { linked: false, shares: 0n, bps: 0n, holderName: null as string | null };
+  const found = holders.find((holder) => holder.name === cleaned);
+  return { linked: true, shares: found?.shares ?? 0n, bps: found?.bps ?? 0n, holderName: cleaned };
+}
+
+export async function loadOwnershipPeople(sql: Sql, businessId: string, holders: Ownership[]) {
+  const meta = await sql<{
+    name: string;
+    owner_id: string;
+    owner_name: string | null;
+    owner_email: string | null;
+    owner_stakeholder_name: string | null;
+  }>`
+    select pr.name, pr.user_id as owner_id, p.full_name as owner_name, u.email as owner_email, b.owner_stakeholder_name
+    from businesses b
+    join projects pr on pr.id = b.project_id
+    left join profiles p on p.id = pr.user_id
+    left join "user" u on u.id = pr.user_id
+    where b.id = ${businessId}
+  `;
+  const members = await sql<{
+    id: string;
+    user_id: string;
+    role: string;
+    full_name: string | null;
+    email: string | null;
+    stakeholder_name: string | null;
+    ownership_decision: string | null;
+  }>`
+    select m.id, m.user_id, m.role, p.full_name, u.email, m.stakeholder_name, m.ownership_decision
+    from biz_members m
+    left join profiles p on p.id = m.user_id
+    left join "user" u on u.id = m.user_id
+    where m.business_id = ${businessId} and m.status = 'active'
+    order by m.joined_at
+  `;
+  const row = meta[0];
+  const people: Array<OwnershipPerson & { email: string | null; holderName: string | null }> = [];
+  if (row) {
+    const position = holderPosition(row.owner_stakeholder_name, holders);
+    people.push({
+      id: "owner",
+      userId: row.owner_id,
+      name: row.owner_name || "Owner",
+      role: "owner",
+      email: row.owner_email,
+      linked: position.linked,
+      shares: position.shares,
+      bps: position.bps,
+      decision: null,
+      holderName: position.holderName,
+    });
+  }
+  for (const member of members) {
+    const position = holderPosition(member.stakeholder_name, holders);
+    people.push({
+      id: member.id,
+      userId: member.user_id,
+      name: member.full_name || "Member",
+      role: member.role,
+      email: member.email,
+      linked: position.linked,
+      shares: position.shares,
+      bps: position.bps,
+      decision: recordedDecision(member.ownership_decision),
+      holderName: position.holderName,
+    });
+  }
+  return { businessName: row?.name || "this business", people };
+}
+
+export async function holdersOf(sql: Sql, businessId: string): Promise<Holder[]> {
   const events = await sql<{ kind: string; holder: string; counterparty: string | null; shares: string }>`
     select kind, holder, counterparty, shares::text as shares
     from biz_equity_events where business_id = ${businessId} order by event_date asc, created_at asc
@@ -453,33 +605,60 @@ export const getBusiness = createServerFn({ method: "POST" })
                sgst_total::text as sgst_total, igst_total::text as igst_total
         from biz_invoices where business_id = ${businessId} order by issue_date desc, number desc
       `;
-      const expenses = await sql<{ id: string; account_code: string; amount: string; memo: string | null; paid: boolean; spent_on: string }>`
-        select id, account_code, amount::text as amount, memo, paid, spent_on::text as spent_on
-        from biz_expenses where business_id = ${businessId} order by spent_on desc
+      const expenses = await sql<{
+        id: string;
+        account_code: string;
+        amount: string;
+        memo: string | null;
+        paid: boolean;
+        spent_on: string;
+        payer_kind: string;
+        payer_user_id: string | null;
+        reimbursed: string;
+        place: string | null;
+      }>`
+        select id, account_code, amount::text as amount, memo, paid, spent_on::text as spent_on,
+               payer_kind, payer_user_id, reimbursed::text as reimbursed, place
+        from biz_expenses where business_id = ${businessId} and environment = 'live'
+        order by spent_on desc
       `;
       const keys = await sql<{ id: string; name: string; prefix: string; environment: string; scopes: string; revoked_at: string | null }>`
         select id, name, prefix, environment, scopes, revoked_at::text as revoked_at
         from biz_api_keys where business_id = ${businessId} order by created_at desc
       `;
-      const holders = can(access.role, "view_equity") ? ownership(await holdersOf(sql, businessId)) : [];
+      const holderRows = ownership(await holdersOf(sql, businessId));
+      const holders = can(access.role, "view_equity") ? holderRows : [];
+      const roster = await loadOwnershipPeople(sql, businessId, holderRows);
+      const ownershipView = buildOwnershipView({
+        businessName: roster.businessName,
+        viewerRole: access.role,
+        members: roster.people,
+      });
       const opening = await sql<{ id: string }>`
         select id from journal_entries
-        where business_id = ${businessId} and source in ('capital', 'opening') and status = 'posted'
+        where business_id = ${businessId} and source in ('capital', 'opening', 'opening_full') and status = 'posted'
         limit 1
       `;
       const profile = await sql<{ setup_completed_at: string | null; business_kind: string | null; gst_registered: string | null }>`
         select setup_completed_at::text as setup_completed_at, business_kind, gst_registered
         from businesses where id = ${businessId}
       `;
-      const cashCodes = new Set(["1000", "1010", "1020"]);
       let cash = 0n;
+      let bank = 0n;
+      let cashBox = 0n;
+      let petty = 0n;
       let receivable = 0n;
       let payable = 0n;
+      let reimbursement = 0n;
       let gstPayable = 0n;
       for (const line of lines) {
-        if (cashCodes.has(line.code)) cash += line.debit - line.credit;
+        if (line.code === "1000") cashBox += line.debit - line.credit;
+        if (line.code === "1010") bank += line.debit - line.credit;
+        if (line.code === "1020") petty += line.debit - line.credit;
+        if (line.code === "1000" || line.code === "1010" || line.code === "1020") cash += line.debit - line.credit;
         if (line.code === "1100") receivable += line.debit - line.credit;
         if (line.code === "2000") payable += line.credit - line.debit;
+        if (line.code === "2500") reimbursement += line.credit - line.debit;
         if (line.code === "2210" || line.code === "2220" || line.code === "2230") gstPayable += line.credit - line.debit;
       }
       const funded = await sql<{ amount: string }>`
@@ -491,6 +670,21 @@ export const getBusiness = createServerFn({ method: "POST" })
           and e.source in ('capital', 'opening', 'contribution')
           and a.code in ('3000', '3100', '3200')
       `;
+      const people = await sql<{ user_id: string; name: string | null; role: string }>`
+        select pr.user_id, p.full_name as name, 'owner' as role
+        from projects pr
+        join businesses b on b.project_id = pr.id
+        left join profiles p on p.id = pr.user_id
+        where b.id = ${businessId}
+        union all
+        select m.user_id, p.full_name, m.role
+        from biz_members m
+        left join profiles p on p.id = m.user_id
+        where m.business_id = ${businessId} and m.status = 'active'
+      `;
+      const owedPeople = new Set(
+        expenses.filter((row) => row.payer_kind === "personal" && toCents(row.amount) > toCents(row.reimbursed) && row.payer_user_id).map((row) => row.payer_user_id),
+      );
       const showKeys = can(access.role, "manage_api_keys");
       const currentBooks = buildStatements(lines, range.from, range.to);
       const previousRange = previousWindow(range.from, range.to);
@@ -516,8 +710,13 @@ export const getBusiness = createServerFn({ method: "POST" })
         setupDone: Boolean(opening[0] || profile[0]?.setup_completed_at),
         businessKind: profile[0]?.business_kind ?? null,
         cash: fromCents(cash),
+        bank: fromCents(bank),
+        cashBox: fromCents(cashBox),
+        petty: fromCents(petty),
         receivable: fromCents(receivable),
         payable: fromCents(payable),
+        reimbursementDue: fromCents(reimbursement),
+        reimbursementPeople: owedPeople.size,
         gstPayable: fromCents(gstPayable),
         ownerFunding: fromCents(toCents(funded[0]?.amount || "0")),
         statements: present(currentBooks),
@@ -530,8 +729,23 @@ export const getBusiness = createServerFn({ method: "POST" })
           issueDate: row.issue_date.slice(0, 10),
           dueDate: row.due_date?.slice(0, 10) ?? null,
         })),
-        expenses: expenses.map((row) => ({ ...row, spentOn: row.spent_on.slice(0, 10) })),
+        expenses: expenses.map((row) => ({
+          ...row,
+          spentOn: row.spent_on.slice(0, 10),
+          payerKind: row.payer_kind,
+          payerUserId: row.payer_user_id,
+          reimbursed: row.reimbursed,
+          place: row.place,
+        })),
+        people: people
+          .filter((person, index, list) => person.user_id && list.findIndex((item) => item.user_id === person.user_id) === index)
+          .map((person) => ({ userId: person.user_id, name: person.name || "Member", role: person.role })),
         holders: holders.map((row) => ({ name: row.name, shares: row.shares.toString(), bps: row.bps.toString() })),
+        stakeholderLinks: can(access.role, "view_equity")
+          ? roster.people.flatMap((person) => (person.holderName ? [{ userId: person.userId, holder: person.holderName }] : []))
+          : [],
+        ownershipPrompt: ownershipView.prompt,
+        ownershipReminder: ownershipView.reminder,
         keys: showKeys ? keys.map((row) => ({ ...row, revoked: Boolean(row.revoked_at) })) : [],
         change: {
           explained: change.explained,
@@ -601,13 +815,25 @@ export const postBusinessExpense = createServerFn({ method: "POST" })
 
 export const postBusinessShares = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((data: { projectId: string; holder: string; shares: number; amount?: string | null; date: string }) => data)
+  .validator((data: { projectId: string; holder: string; shares: number; amount?: string | null; date: string; linkUserId?: string | null }) => data)
   .handler(async ({ context, data }) => {
     try {
       const { sql, businessId } = await withBusiness(context.userId, data.projectId, "manage_equity");
       return await issueShares(sql, context.userId, businessId, data);
     } catch (err) {
       publicError(err, "Couldn't issue those shares.");
+    }
+  });
+
+export const linkBusinessStakeholder = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; holder: string; linkUserId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql, businessId } = await withBusiness(context.userId, data.projectId, "manage_equity");
+      return await linkStakeholder(sql, context.userId, businessId, data);
+    } catch (err) {
+      publicError(err, "Couldn't link that shareholder.");
     }
   });
 

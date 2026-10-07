@@ -1,46 +1,50 @@
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { formatMoney, fromCents, toCents } from "@/lib/money";
+import { formatMoney, fromCents, isZero, toCents } from "@/lib/money";
 import { METRIC_HELP } from "@/lib/ledger";
 import { simulateRound } from "@/lib/cap-table";
-import {
-  createBusinessApiKey,
-  getBusiness,
-  postBusinessCapital,
-  postBusinessExpense,
-  postBusinessInvoice,
-  postBusinessPayment,
-  postBusinessShares,
-  revokeBusinessApiKey,
-  SCOPES,
-} from "@/lib/server/business";
+import { can } from "@/lib/biz-access";
+import { assignOwnershipIntent } from "@/lib/ownership-decision";
+import { getBusiness, linkBusinessStakeholder, postBusinessCapital, postBusinessShares } from "@/lib/server/business";
+import { decideBusinessOwnership } from "@/lib/server/biz-team";
 import { todayISO } from "@/lib/utils";
 import { InvoiceDesk } from "@/components/finance/invoice-desk";
 import { DeveloperPortal } from "@/components/finance/developer-portal";
 import { BusinessSetup } from "@/components/finance/business-setup";
 import { BusinessOps } from "@/components/finance/business-ops";
+import { accountActivity, checkBooks } from "@/lib/server/ops";
 import { BusinessTeam } from "@/components/finance/business-team";
 import { LearnButton, LearnPanel, dismissLearnTip, learnTipVisible } from "@/components/finance/learn-panel";
 import type { LearnSnapshot } from "@/lib/learn-explain";
-import { useEffect } from "react";
+import { useCurrentUser } from "@/lib/auth/use-current-user";
+import { BusinessEmptyState, BusinessListRow, BusinessMetric, BusinessPageHeader, BusinessSection, BusinessStatusBadge } from "@/components/finance/business-ui";
+import { MoneyHub, ReimbursementDesk, SpendForm, TransferForm } from "@/components/finance/business-spend";
 
-type Section = "home" | "invoices" | "expenses" | "reports" | "equity" | "team" | "developer" | "guide" | "vendors" | "bills" | "money" | "budgets" | "loans" | "assets";
+type Section = "home" | "invoices" | "expenses" | "reports" | "equity" | "team" | "developer" | "guide" | "vendors" | "bills" | "money" | "budgets" | "loans" | "assets" | "reimbursements" | "settings";
 
 export function BusinessWorkspace({ projectId, projectName, currency }: { projectId: string; projectName: string; currency: string }) {
   const today = todayISO();
+  const user = useCurrentUser();
   const qc = useQueryClient();
   const [section, setSection] = useState<Section>("home");
   const [more, setMore] = useState(false);
   const [add, setAdd] = useState(false);
   const [period, setPeriod] = useState("month");
   const [money, setMoney] = useState(false);
+  const [transfer, setTransfer] = useState(false);
   const [learn, setLearn] = useState<string | null>(null);
   const [focusConcept, setFocusConcept] = useState<string | null>(null);
   const [showTip, setShowTip] = useState(false);
+  const [expenseOpen, setExpenseOpen] = useState(false);
+  const [expensePreset, setExpensePreset] = useState<"business" | "personal" | "unpaid">("business");
+  const [report, setReport] = useState<string | null>(null);
+  const [invoiceSetup, setInvoiceSetup] = useState(false);
+  const [equityDraft, setEquityDraft] = useState<{ holder: string; linkUserId: string } | null>(null);
+  const [skippedPrompt, setSkippedPrompt] = useState<string | null>(null);
   const q = useQuery({
     queryKey: ["business", projectId, today, period],
     queryFn: () => getBusiness({ data: { projectId, today, period } }),
@@ -48,14 +52,17 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
 
   useEffect(() => {
     document.documentElement.dataset.hideQuickAdd = "1";
+    document.documentElement.dataset.business = "1";
     setShowTip(learnTipVisible());
     return () => {
       delete document.documentElement.dataset.hideQuickAdd;
+      delete document.documentElement.dataset.business;
     };
   }, []);
 
   async function reload() {
     await qc.invalidateQueries({ queryKey: ["business", projectId] });
+    await qc.invalidateQueries({ queryKey: ["biz-team", projectId] });
   }
 
   if (q.isPending) return <p className="text-sm text-muted-foreground">Loading your business…</p>;
@@ -104,15 +111,25 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
     holders: data.holders,
     change: data.change,
     runwayNote: data.runway.note,
+    reimbursement: data.reimbursementDue,
   };
   function openLearn(page: string, concept?: string) {
     setFocusConcept(concept ?? null);
     setLearn(page);
   }
-  const canEquity = data.role === "owner" || data.role === "admin";
-  const canDev = data.role === "owner";
-  const canWrite = data.role !== "viewer";
-  const quiet = books.totalRevenue === "0.00" && data.expenses.length === 0;
+  const canEquity = can(data.role, "view_equity");
+  const canDev = can(data.role, "manage_api_keys");
+  const canWrite = can(data.role, "create_records");
+  const canPersonal = can(data.role, "record_personal_business_expense");
+  const canPayTeam = can(data.role, "manage_reimbursements");
+  const moneyFmt = (value: string) => formatMoney(value, currency, { compact: true });
+  const selfId = user?.id || data.people.find((person) => person.role === "owner")?.userId || "";
+  const inPeriod = data.expenses.filter((row) => row.spentOn >= data.range.from && row.spentOn <= data.range.to);
+  const periodSpend = inPeriod.reduce((sum, row) => sum + toCents(row.amount), 0n);
+  const byAccount = new Map<string, bigint>();
+  for (const row of inPeriod) byAccount.set(row.account_code, (byAccount.get(row.account_code) ?? 0n) + toCents(row.amount));
+  const commitments = toCents(data.payable) > 0n || toCents(data.reimbursementDue) > 0n;
+  const afterObligations = toCents(data.cash) - toCents(data.payable) - toCents(data.reimbursementDue);
 
   function open(next: Section) {
     setSection(next);
@@ -120,151 +137,304 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
     setAdd(false);
   }
 
+  const prompt = data.ownershipPrompt && data.ownershipPrompt.memberId !== skippedPrompt ? data.ownershipPrompt : null;
+
+  function openEquityFor(person: { name: string; userId: string }) {
+    const intent = assignOwnershipIntent(person);
+    setEquityDraft({ holder: intent.holder, linkUserId: intent.linkUserId });
+    open("equity");
+  }
+
   return (
-    <div className="lg:grid lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-8">
+    <div className="lg:grid lg:grid-cols-[200px_minmax(0,42rem)] lg:justify-start lg:gap-10">
       <aside className="mb-4 hidden lg:block">
-        <p className="px-3 text-[11px] tracking-wide text-muted-foreground uppercase">Business</p>
-        <div className="mt-2 grid gap-1">
+        <p className="px-2 text-xs text-muted-foreground">{projectName}</p>
+        <NavGroup label="Today">
           <Side label="Overview" active={section === "home"} onClick={() => open("home")} />
-          <Side label="Invoices" active={section === "invoices"} onClick={() => open("invoices")} />
+          <Side label="Sales" active={section === "invoices"} onClick={() => open("invoices")} />
           <Side label="Expenses" active={section === "expenses"} onClick={() => open("expenses")} />
-          <Side label="Reports" active={section === "reports"} onClick={() => open("reports")} />
-          {canEquity && <Side label="Equity" active={section === "equity"} onClick={() => open("equity")} />}
+        </NavGroup>
+        <NavGroup label="Money">
           <Side label="Money" active={section === "money"} onClick={() => open("money")} />
-          <Side label="Vendors" active={section === "vendors"} onClick={() => open("vendors")} />
+          <Side label="Reimbursements" active={section === "reimbursements"} onClick={() => open("reimbursements")} />
           <Side label="Bills" active={section === "bills"} onClick={() => open("bills")} />
+          <Side label="Vendors" active={section === "vendors"} onClick={() => open("vendors")} />
+        </NavGroup>
+        <NavGroup label="Planning">
           <Side label="Budgets" active={section === "budgets"} onClick={() => open("budgets")} />
           <Side label="Loans" active={section === "loans"} onClick={() => open("loans")} />
           <Side label="Assets" active={section === "assets"} onClick={() => open("assets")} />
+        </NavGroup>
+        <NavGroup label="Business">
+          <Side label="Reports" active={section === "reports"} onClick={() => open("reports")} />
+          {canEquity && <Side label="Equity" active={section === "equity"} onClick={() => open("equity")} />}
           <Side label="Team" active={section === "team"} onClick={() => open("team")} />
+        </NavGroup>
+        <NavGroup label="System">
           <Side label="Guide" active={section === "guide"} onClick={() => open("guide")} />
           {canDev && <Side label="Developer" active={section === "developer"} onClick={() => open("developer")} />}
-        </div>
+          <Side label="Settings" active={section === "settings"} onClick={() => open("settings")} />
+        </NavGroup>
       </aside>
-      <div className="min-w-0 space-y-4 pb-24">
-        <div className="grid grid-cols-4 gap-2 lg:hidden">
+      <div className="min-w-0 space-y-4 pb-6">
+        <div className="grid grid-cols-4 gap-1.5 lg:hidden">
           <Tab label="Overview" active={section === "home"} onClick={() => open("home")} />
           <Tab label="Sales" active={section === "invoices"} onClick={() => open("invoices")} />
           <Tab label="Expenses" active={section === "expenses"} onClick={() => open("expenses")} />
           <Tab label="More" active={more} onClick={() => setMore((value) => !value)} />
         </div>
         {more && (
-          <div className="grid gap-2 rounded-xl bg-card p-3 lg:hidden">
-            <p className="text-[11px] tracking-wide text-muted-foreground uppercase">Sales</p>
-            <Tab label="Invoices" active={section === "invoices"} onClick={() => open("invoices")} />
-            <p className="text-[11px] tracking-wide text-muted-foreground uppercase">Business</p>
-            <Tab label="Reports" active={section === "reports"} onClick={() => open("reports")} />
-            {canEquity && <Tab label="Equity" active={section === "equity"} onClick={() => open("equity")} />}
-            <p className="text-[11px] tracking-wide text-muted-foreground uppercase">Manage</p>
-            <Tab label="Money" active={section === "money"} onClick={() => open("money")} />
-            <Tab label="Vendors" active={section === "vendors"} onClick={() => open("vendors")} />
-            <Tab label="Bills" active={section === "bills"} onClick={() => open("bills")} />
-            <Tab label="Budgets" active={section === "budgets"} onClick={() => open("budgets")} />
-            <Tab label="Loans" active={section === "loans"} onClick={() => open("loans")} />
-            <Tab label="Assets" active={section === "assets"} onClick={() => open("assets")} />
-            <Tab label="Team" active={section === "team"} onClick={() => open("team")} />
-            <Tab label="Guide" active={section === "guide"} onClick={() => open("guide")} />
-            {canDev && <Tab label="Developer" active={section === "developer"} onClick={() => open("developer")} />}
+          <div className="space-y-3 rounded-xl border border-border/70 p-3 lg:hidden">
+            <MoreGroup title="Money" items={[["money", "Accounts"], ["invoices", "Money to collect"], ["bills", "Money to pay"], ["reimbursements", "Reimbursements"]]} section={section} open={open} />
+            <MoreGroup title="Sales" items={[["invoices", "Invoices"], ["invoices", "Customers"]]} section={section} open={open} />
+            <MoreGroup title="Spending" items={[["expenses", "Expenses"], ["vendors", "Vendors"], ["bills", "Bills"]]} section={section} open={open} />
+            <MoreGroup title="Planning" items={[["budgets", "Budgets"], ["loans", "Loans"], ["assets", "Assets"]]} section={section} open={open} />
+            <MoreGroup title="Business" items={[["reports", "Reports"], ...(canEquity ? [["equity", "Equity"] as const] : []), ["team", "Team"]]} section={section} open={open} />
+            <MoreGroup title="System" items={[["guide", "Guide"], ...(canDev ? [["developer", "Developer"] as const] : []), ["settings", "Settings"]]} section={section} open={open} />
           </div>
         )}
         {books.error && <p className="rounded-xl bg-card p-4 text-sm text-expense">{books.error}</p>}
         {section === "home" && (
           <div className="space-y-4">
-            <div className="flex items-end justify-between gap-3">
-              <div>
-                <p className="text-xs tracking-wide text-muted-foreground uppercase">Business</p>
-                <h2 className="font-display text-2xl">Here's how {projectName} is doing</h2>
-              </div>
-              <div className="flex items-center gap-2">
-                <LearnButton compact onClick={() => openLearn("home")} />
-                <select className="h-11 rounded-md bg-card px-3 text-sm" value={period} onChange={(event) => setPeriod(event.target.value)} aria-label="Period">
+            <BusinessPageHeader
+              context="Business"
+              title={projectName}
+              aside={
+                <>
+                  <LearnButton compact onClick={() => openLearn("home")} />
+                  {(canWrite || canPersonal) && <Button type="button" className="h-9" onClick={() => setAdd(true)}>Add</Button>}
+                </>
+              }
+            />
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm text-muted-foreground">Business overview</p>
+              <select className="h-9 rounded-md bg-card px-2 text-sm" value={period} onChange={(event) => setPeriod(event.target.value)} aria-label="Period">
                 <option value="month">This month</option>
                 <option value="last_month">Last month</option>
                 <option value="quarter">This quarter</option>
                 <option value="year">This financial year</option>
-                </select>
-              </div>
+              </select>
             </div>
             {showTip && (
               <p className="text-sm text-muted-foreground">
-                New to business finance? Tap Learn anytime to understand a number.{" "}
+                New here? Learn explains a number without changing the books.{" "}
                 <button type="button" className="underline" onClick={() => { dismissLearnTip(); setShowTip(false); }}>Dismiss</button>
               </p>
             )}
-            <div className="rounded-xl bg-card p-4">
-              <p className="text-[11px] tracking-wide text-muted-foreground uppercase">Cash available</p>
-              <p className="mt-1 font-display text-3xl tabular">{formatMoney(data.cash, currency)}</p>
-              <p className="mt-1 text-xs text-muted-foreground">Money currently in cash and bank. Not the same as this period's sales.</p>
+            <div className="rounded-xl bg-card px-4 py-3">
+              <p className="text-xs text-muted-foreground">Cash available</p>
+              <p className="mt-1 font-display text-[1.75rem] leading-none tabular">{moneyFmt(data.cash)}</p>
+              {toCents(data.reimbursementDue) > 0n && (
+                <p className="mt-2 text-sm text-muted-foreground">{moneyFmt(data.reimbursementDue)} is currently owed back to team members</p>
+              )}
+              {toCents(data.payable) > 0n && (
+                <p className="mt-1 text-sm text-muted-foreground">{moneyFmt(data.payable)} due to vendors</p>
+              )}
             </div>
-            {quiet ? (
-              <div className="rounded-xl bg-card p-4">
-                <p className="font-medium">No sales yet</p>
-                <p className="mt-1 text-sm text-muted-foreground">Revenue {formatMoney(books.totalRevenue, currency)} · Profit {formatMoney(books.netProfit, currency)}. Starting money is not revenue.</p>
-                <Button type="button" className="mt-3 h-11" onClick={() => open("invoices")}>Create your first invoice</Button>
-              </div>
+            {isZero(books.totalRevenue) && inPeriod.length === 0 ? (
+              <BusinessEmptyState title="No sales yet" body="Create your first invoice to start tracking revenue. Money you put in is not a sale." action={<Button type="button" className="h-11" onClick={() => open("invoices")}>Create invoice</Button>} />
             ) : (
               <div className="grid grid-cols-2 gap-2">
-                <Card label="Revenue" value={formatMoney(books.totalRevenue, currency)} hint="Money earned from sales this period, before expenses." onLearn={() => openLearn("home", "revenue")} />
-                <Card label="Profit" value={formatMoney(books.netProfit, currency)} hint="What remains after business expenses, interest and taxes." onLearn={() => openLearn("home", "profit")} />
-                <Card label="Money to collect" value={formatMoney(data.receivable, currency)} hint="Accounts receivable" onLearn={() => openLearn("home", "receivable")} />
-                <Card label="Money to pay" value={formatMoney(data.payable, currency)} hint="Accounts payable" onLearn={() => openLearn("home", "payable")} />
+                <BusinessMetric label="Revenue" value={moneyFmt(books.totalRevenue)} />
+                <BusinessMetric label="Expenses" value={moneyFmt(fromCents(periodSpend))} />
+                <BusinessMetric label="Profit" value={moneyFmt(books.netProfit)} hint="Kept in the business" />
+                <BusinessMetric label="Money to collect" value={moneyFmt(data.receivable)} />
               </div>
             )}
-            {canWrite && (
-              <Button type="button" variant="secondary" className="h-11" onClick={() => setMoney((value) => !value)}>Add money to business</Button>
+            {commitments && (
+              <BusinessSection title="Cash commitments">
+                <div className="rounded-lg border border-border/70 px-3">
+                  <BusinessListRow title="Cash available" value={moneyFmt(data.cash)} />
+                  {toCents(data.reimbursementDue) > 0n && <BusinessListRow title="Team reimbursements" value={moneyFmt(data.reimbursementDue)} />}
+                  {toCents(data.payable) > 0n && <BusinessListRow title="Vendor bills" value={moneyFmt(data.payable)} />}
+                  <BusinessListRow title="After current obligations" value={moneyFmt(fromCents(afterObligations))} />
+                </div>
+                {toCents(data.reimbursementDue) > 0n && (
+                  <button type="button" className="text-sm text-muted-foreground underline" onClick={() => open("reimbursements")}>
+                    {moneyFmt(data.reimbursementDue)} due · {data.reimbursementPeople} {data.reimbursementPeople === 1 ? "person" : "people"} covered expenses personally. Review
+                  </button>
+                )}
+              </BusinessSection>
             )}
             <p className="text-sm text-muted-foreground">{data.runway.note}{data.runway.months ? ` About ${data.runway.months} months.` : ""}</p>
-            <Button type="button" variant="ghost" className="h-11 px-0" onClick={() => openLearn("home", "profit")}>Why did this change?</Button>
-            {money && <AddMoney projectId={projectId} date={today} onSaved={reload} />}
+            <button type="button" className="min-h-11 text-sm text-muted-foreground" onClick={() => openLearn("home", "profit")}>Why did this change?</button>
+            {money && canWrite && <AddMoney projectId={projectId} date={today} onSaved={async () => { setMoney(false); await reload(); }} />}
+            {transfer && canWrite && <TransferForm projectId={projectId} date={today} onSaved={reload} />}
           </div>
         )}
         {section === "invoices" && (
           <div className="space-y-3">
-            <LearnButton onClick={() => openLearn("invoices")} />
-            <InvoiceDesk projectId={projectId} currency={currency} />
+            <BusinessPageHeader title="Sales" context={projectName} aside={<LearnButton compact onClick={() => openLearn("invoices")} />} />
+            <p className="text-sm text-muted-foreground">Who owes you, and what you've sold.</p>
+            <Button type="button" className="h-11" onClick={() => { window.dispatchEvent(new Event("kharcha-new-invoice")); document.getElementById("new-invoice")?.scrollIntoView({ behavior: "smooth", block: "start" }); }}>Create invoice</Button>
+            <InvoiceDesk projectId={projectId} currency={currency} startSetup={invoiceSetup} />
           </div>
         )}
         {section === "expenses" && (
-          <div className="space-y-3">
-            <LearnButton onClick={() => openLearn("expenses")} />
-            {data.expenses.length === 0 && (
-              <div className="rounded-xl bg-card p-4">
-                <p className="font-medium">No expenses yet</p>
-                <p className="mt-1 text-sm text-muted-foreground">Record money your business spends.</p>
-              </div>
-            )}
-            {canWrite && <ExpensePanel projectId={projectId} date={today} currency={currency} accounts={data.expenseAccounts} expenses={data.expenses} onSaved={reload} />}
-            {!canWrite && data.expenses.length > 0 && (
-              <ul className="space-y-2">
-                {data.expenses.map((row) => (
-                  <li key={row.id} className="rounded-xl bg-card p-4 text-sm">{row.memo || "Expense"} · {formatMoney(row.amount, currency)}</li>
+          <div className="space-y-4">
+            <BusinessPageHeader title="Expenses" context={data.range.label} aside={<LearnButton compact onClick={() => openLearn("expenses")} />} />
+            <div className="rounded-xl bg-card px-4 py-3">
+              <p className="text-xs text-muted-foreground">This month</p>
+              <p className="text-2xl font-medium tabular">{moneyFmt(fromCents(periodSpend))}</p>
+            </div>
+            {byAccount.size > 0 && (
+              <BusinessSection title="Where it went">
+                {[...byAccount.entries()].map(([code, amount]) => (
+                  <BusinessListRow key={code} title={data.expenseAccounts.find((account) => account.code === code)?.name || code} value={moneyFmt(fromCents(amount))} />
                 ))}
-              </ul>
+              </BusinessSection>
+            )}
+            {inPeriod.length === 0 && (
+              <BusinessEmptyState title="No spending in this period" body="Record a business expense, including something a founder paid personally." />
+            )}
+            {inPeriod.length > 0 && (
+              <BusinessSection title="Recent spending">
+                {inPeriod.slice(0, 8).map((row) => {
+                  const returned = toCents(row.reimbursed || "0");
+                  const open = toCents(row.amount) - returned;
+                  const personal = row.payerKind === "personal";
+                  const badge = row.payerKind === "unpaid" ? "Unpaid" : personal ? (open <= 0n ? "Returned" : returned > 0n ? "Part due" : "Owed") : "Paid";
+                  const tone = badge === "Returned" || badge === "Paid" ? "paid" : badge === "Unpaid" ? "open" : "personal";
+                  return (
+                  <BusinessListRow
+                    key={row.id}
+                    title={row.memo || data.expenseAccounts.find((account) => account.code === row.account_code)?.name || "Expense"}
+                    meta={personal ? "Paid personally" : row.payerKind === "unpaid" ? "Not paid yet" : "Business account"}
+                    value={moneyFmt(row.amount)}
+                    action={<BusinessStatusBadge tone={tone}>{badge}</BusinessStatusBadge>}
+                  />
+                  );
+                })}
+              </BusinessSection>
+            )}
+            {(canWrite || canPersonal) && (
+              expenseOpen ? (
+                <div className="rounded-xl bg-card p-4">
+                  <SpendForm
+                    projectId={projectId}
+                    date={today}
+                    accounts={data.expenseAccounts}
+                    people={data.people}
+                    selfId={selfId}
+                    canRecordPersonal={canPersonal}
+                    canRecordBusiness={canWrite}
+                    preset={expensePreset}
+                    onSaved={reload}
+                  />
+                </div>
+              ) : (
+                <Button type="button" className="h-11" onClick={() => { setExpensePreset("business"); setExpenseOpen(true); }}>Record expense</Button>
+              )
             )}
           </div>
         )}
         {section === "reports" && (
           <div className="space-y-3">
-            <LearnButton onClick={() => openLearn("reports")} />
-            <Reports books={books} currency={currency} onLearn={(concept) => openLearn("reports", concept)} />
+            {!report && (
+              <>
+                <BusinessPageHeader title="Reports" context={projectName} aside={<LearnButton compact onClick={() => openLearn("reports")} />} />
+                <p className="text-sm text-muted-foreground">Understand where the business stands.</p>
+                <div className="grid gap-2">
+                  {[
+                    ["pnl", "Profit & Loss", "What you earned and spent"],
+                    ["balance", "Balance Sheet", "What you own and owe"],
+                    ["cash", "Cash Flow", "Where your money moved"],
+                    ["collect", "Receivables", "Who needs to pay you"],
+                    ["pay", "Payables", "Who you need to pay"],
+                  ].map(([id, title, body]) => (
+                    <button key={id} type="button" className="rounded-lg border border-border/70 px-3 py-3 text-left" onClick={() => setReport(id!)}>
+                      <span className="block text-sm font-medium">{title}</span>
+                      <span className="block text-xs text-muted-foreground">{body}</span>
+                    </button>
+                  ))}
+                  <button type="button" className="px-1 py-2 text-left text-sm text-muted-foreground" onClick={() => setReport("trial")}>Trial balance and general ledger</button>
+                </div>
+              </>
+            )}
+            {report && (
+              <>
+                <button type="button" className="min-h-11 text-sm text-muted-foreground" onClick={() => setReport(null)}>All reports</button>
+                <Reports books={books} currency={currency} projectId={projectId} from={data.range.from} to={data.range.to} focus={report} onLearn={(concept) => openLearn("reports", concept)} />
+              </>
+            )}
           </div>
         )}
         {section === "equity" && canEquity && (
           <div className="space-y-3">
-            <LearnButton onClick={() => openLearn("equity")} />
-            <EquityPanel projectId={projectId} date={today} currency={currency} holders={data.holders} onSaved={reload} />
+            <BusinessPageHeader title="Who owns this?" context={projectName} aside={<LearnButton compact onClick={() => openLearn("equity")} />} />
+            {data.ownershipReminder && <p className="text-sm text-muted-foreground">{data.ownershipReminder}</p>}
+            {data.holders.length === 0 && (
+              <BusinessEmptyState title="Ownership isn't set up yet" body="Your team can use this business without having company shares." />
+            )}
+            <EquityPanel
+              projectId={projectId}
+              date={today}
+              currency={currency}
+              holders={data.holders}
+              people={data.people}
+              links={data.stakeholderLinks ?? []}
+              canLink={can(data.role, "manage_equity")}
+              draft={equityDraft}
+              onSaved={async () => {
+                setEquityDraft(null);
+                await reload();
+              }}
+            />
           </div>
         )}
-        {(section === "vendors" || section === "bills" || section === "money" || section === "budgets" || section === "loans" || section === "assets") && (
+        {section === "reimbursements" && (
           <div className="space-y-3">
-            <LearnButton onClick={() => openLearn(section === "budgets" ? "reports" : "expenses")} />
+            <div className="flex justify-end"><LearnButton compact onClick={() => openLearn("reimbursements")} /></div>
+            <ReimbursementDesk
+              projectId={projectId}
+              currency={currency}
+              date={today}
+              accounts={{ bank: data.bank, cash: data.cashBox, petty: data.petty }}
+              onSaved={reload}
+            />
+          </div>
+        )}
+        {section === "money" && (
+          <div className="space-y-4">
+            <MoneyHub
+              currency={currency}
+              cash={data.cash}
+              bank={data.bank}
+              cashBox={data.cashBox}
+              petty={data.petty}
+              receivable={data.receivable}
+              payable={data.payable}
+              reimbursement={data.reimbursementDue}
+              onOpen={(next) => open(next === "invoices" ? "invoices" : next)}
+            />
+            {canWrite && <TransferForm projectId={projectId} date={today} onSaved={reload} />}
+          </div>
+        )}
+        {section === "settings" && (
+          <div className="space-y-3">
+            <BusinessPageHeader title="Settings" context={projectName} />
+            <p className="text-sm text-muted-foreground">GSTIN, seller details, and accounting setup stay here so Sales stays about getting paid.</p>
+            <Button type="button" className="h-11" onClick={() => { setInvoiceSetup(true); open("invoices"); }}>Invoice details</Button>
+            <p className="text-sm text-muted-foreground">Kind: {data.businessKind || "Not set"}</p>
+          </div>
+        )}
+        {(section === "vendors" || section === "bills" || section === "budgets" || section === "loans" || section === "assets") && (
+          <div className="space-y-3">
+            <LearnButton compact onClick={() => openLearn(section === "budgets" ? "reports" : "expenses")} />
             <BusinessOps projectId={projectId} mode={section} currency={currency} today={today} openingDone={data.openingDone} />
           </div>
         )}
         {section === "team" && (
           <div className="space-y-3">
-            <LearnButton onClick={() => openLearn("team")} />
-            <BusinessTeam projectId={projectId} name={projectName} />
+            <div className="flex justify-end"><LearnButton compact onClick={() => openLearn("team")} /></div>
+            <BusinessTeam
+              projectId={projectId}
+              name={projectName}
+              onAssignOwnership={(draft) => {
+                setEquityDraft(draft);
+                open("equity");
+              }}
+            />
           </div>
         )}
         {section === "guide" && (
@@ -280,23 +450,73 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
             <DeveloperPortal projectId={projectId} />
           </div>
         )}
-        {canWrite && (
-          <button type="button" className="fixed right-4 bottom-20 z-30 grid size-14 place-items-center rounded-full bg-foreground text-2xl text-background lg:bottom-8" onClick={() => setAdd(true)} aria-label="Add">
-            +
-          </button>
-        )}
-        {add && (
-          <div className="fixed inset-x-0 bottom-0 z-40 rounded-t-2xl bg-card p-4 pb-8 shadow-[var(--elev-shadow)]">
+        {(canWrite || canPersonal) && add && (
+          <div className="fixed inset-x-0 bottom-16 z-40 mx-auto max-w-lg rounded-t-2xl border border-border bg-card p-4 pb-6 shadow-[var(--elev-shadow)] lg:bottom-6">
             <p className="text-sm font-medium">Add</p>
             <div className="mt-3 grid gap-2">
-              <Button type="button" variant="secondary" className="h-11" onClick={() => open("invoices")}>Create invoice</Button>
-              <Button type="button" variant="secondary" className="h-11" onClick={() => open("expenses")}>Record expense</Button>
-              <Button type="button" variant="secondary" className="h-11" onClick={() => { setMoney(true); open("home"); }}>Add money to business</Button>
+              {canWrite && <Button type="button" variant="secondary" className="h-11" onClick={() => open("invoices")}>Create invoice</Button>}
+              {(canWrite || canPersonal) && <Button type="button" variant="secondary" className="h-11" onClick={() => { setExpensePreset(canWrite ? "business" : "personal"); setExpenseOpen(true); open("expenses"); }}>Record expense</Button>}
+              {canWrite && <Button type="button" variant="secondary" className="h-11" onClick={() => open("bills")}>Add bill</Button>}
+              {canWrite && <Button type="button" variant="secondary" className="h-11" onClick={() => open("invoices")}>Record payment</Button>}
+              {canWrite && <Button type="button" variant="secondary" className="h-11" onClick={() => { setMoney(true); open("home"); }}>Add money to business</Button>}
+              {canPersonal && <Button type="button" variant="secondary" className="h-11" onClick={() => { setExpensePreset("personal"); setExpenseOpen(true); open("expenses"); }}>Paid personally</Button>}
+              {canWrite && <Button type="button" variant="secondary" className="h-11" onClick={() => { setTransfer(true); open("home"); }}>Transfer money</Button>}
             </div>
             <Button type="button" variant="ghost" className="mt-2 h-11 w-full" onClick={() => setAdd(false)}>Close</Button>
           </div>
         )}
         {learn && <LearnPanel page={learn} snapshot={snapshot} focusConcept={focusConcept} onClose={() => setLearn(null)} />}
+        {prompt && (
+          <div className="fixed inset-0 z-50 flex items-end justify-center bg-overlay p-4 pb-24 sm:items-center sm:pb-4" role="dialog" aria-modal="true" aria-labelledby="ownership-prompt-title">
+            <div className="w-full max-w-md rounded-xl bg-card p-5 shadow-[var(--elev-shadow)]">
+              <h2 id="ownership-prompt-title" className="font-display text-xl tracking-tight">{prompt.title}</h2>
+              <p className="mt-2 text-sm text-muted-foreground">{prompt.body}</p>
+              <div className="mt-4 grid gap-2">
+                <Button
+                  type="button"
+                  className="h-11"
+                  onClick={() => {
+                    setSkippedPrompt(prompt.memberId);
+                    openEquityFor(prompt);
+                  }}
+                >
+                  Assign ownership
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="h-11"
+                  onClick={async () => {
+                    try {
+                      await decideBusinessOwnership({ data: { projectId, memberId: prompt.memberId, decision: "none" } });
+                      toast.success("No shares assigned");
+                      await reload();
+                    } catch (err) {
+                      toast.error(err instanceof Error ? err.message : "Couldn't save that");
+                    }
+                  }}
+                >
+                  No shares
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="h-11"
+                  onClick={async () => {
+                    try {
+                      await decideBusinessOwnership({ data: { projectId, memberId: prompt.memberId, decision: "later" } });
+                      await reload();
+                    } catch (err) {
+                      toast.error(err instanceof Error ? err.message : "Couldn't save that");
+                    }
+                  }}
+                >
+                  Decide later
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -304,15 +524,37 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
 
 function Tab({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
-    <button type="button" onClick={onClick} className={`h-11 rounded-md px-2 text-sm ${active ? "bg-foreground text-background" : "bg-card text-muted-foreground"}`}>
+    <button type="button" onClick={onClick} className={`h-10 rounded-md px-1 text-sm ${active ? "bg-foreground text-background" : "text-muted-foreground"}`}>
       {label}
     </button>
   );
 }
 
+function NavGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="mt-4">
+      <p className="px-2 text-[11px] text-muted-foreground">{label}</p>
+      <div className="mt-1 grid">{children}</div>
+    </div>
+  );
+}
+
+function MoreGroup({ title, items, section, open }: { title: string; items: readonly (readonly [string, string])[]; section: Section; open: (next: Section) => void }) {
+  return (
+    <div>
+      <p className="text-[11px] text-muted-foreground">{title}</p>
+      <div className="mt-1 grid">
+        {items.map(([id, label]) => (
+          <button key={`${title}-${label}`} type="button" className={`h-10 rounded-md px-2 text-left text-sm ${section === id ? "bg-foreground text-background" : ""}`} onClick={() => open(id as Section)}>{label}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Side({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
-    <button type="button" onClick={onClick} className={`h-11 rounded-md px-3 text-left text-sm ${active ? "bg-foreground text-background" : "text-muted-foreground hover:bg-card"}`}>
+    <button type="button" onClick={onClick} className={`rounded-md px-2 py-1.5 text-left text-sm ${active ? "bg-foreground text-background" : "text-muted-foreground hover:bg-card"}`}>
       {label}
     </button>
   );
@@ -359,159 +601,13 @@ function AddMoney({ projectId, date, onSaved }: { projectId: string; date: strin
   );
 }
 
-function Card({ label, value, hint, onLearn }: { label: string; value: string; hint?: string; onLearn?: () => void }) {
-  return (
-    <div className="rounded-xl bg-card p-4" title={hint}>
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-[11px] tracking-wide text-muted-foreground uppercase">{label}</p>
-        {onLearn && (
-          <button type="button" className="text-xs text-muted-foreground" aria-label={`Learn about ${label}`} onClick={onLearn}>💡</button>
-        )}
-      </div>
-      <p className="mt-1 font-display text-xl tabular">{value}</p>
-      {hint && <p className="mt-1 text-xs text-muted-foreground">{hint}</p>}
-    </div>
-  );
-}
-
-function InvoicePanel({
-  projectId,
-  date,
-  currency,
-  invoices,
-  onSaved,
-}: {
-  projectId: string;
-  date: string;
-  currency: string;
-  invoices: { id: string; number: string; customer_name: string; total: string; amount_paid: string; status: string }[];
-  onSaved: () => Promise<void>;
-}) {
-  const [customer, setCustomer] = useState("");
-  const [amount, setAmount] = useState("");
-  const [busy, setBusy] = useState(false);
-  return (
-    <div className="space-y-3">
-      <form
-        className="grid gap-3 rounded-xl bg-card p-4"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          setBusy(true);
-          try {
-            await postBusinessInvoice({ data: { projectId, customer, subtotal: amount, date } });
-            setCustomer("");
-            setAmount("");
-            toast.success("Invoice issued. Revenue and receivable posted once.");
-            await onSaved();
-          } catch (err) {
-            toast.error(err instanceof Error ? err.message : "Couldn't invoice");
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
-        <Label htmlFor="cust">Customer</Label>
-        <Input id="cust" value={customer} onChange={(event) => setCustomer(event.target.value)} />
-        <Label htmlFor="inv-amt">Amount</Label>
-        <Input id="inv-amt" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} />
-        <Button type="submit" disabled={busy}>Issue invoice</Button>
-      </form>
-      {invoices.map((invoice) => (
-        <div key={invoice.id} className="rounded-xl bg-card p-4">
-          <div className="flex items-baseline justify-between gap-3">
-            <p className="font-medium">{invoice.number}</p>
-            <p className="text-xs capitalize text-muted-foreground">{invoice.status.replaceAll("_", " ")}</p>
-          </div>
-          <p className="text-sm text-muted-foreground">{invoice.customer_name}</p>
-          <p className="mt-1 tabular">{formatMoney(invoice.total, currency)}</p>
-          {invoice.status !== "paid" && invoice.status !== "void" && (
-            <Button
-              type="button"
-              variant="secondary"
-              className="mt-3 h-11"
-              onClick={async () => {
-                const open = fromCents(toCents(invoice.total) - toCents(invoice.amount_paid));
-                try {
-                  await postBusinessPayment({ data: { projectId, invoiceId: invoice.id, amount: open, date } });
-                  toast.success("Payment posted to cash. Revenue was not counted again.");
-                  await onSaved();
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : "Couldn't collect");
-                }
-              }}
-            >
-              Mark paid
-            </Button>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function ExpensePanel({
-  projectId,
-  date,
-  currency,
-  accounts,
-  expenses,
-  onSaved,
-}: {
-  projectId: string;
-  date: string;
-  currency: string;
-  accounts: { code: string; name: string }[];
-  expenses: { id: string; account_code: string; amount: string; memo: string | null; paid: boolean }[];
-  onSaved: () => Promise<void>;
-}) {
-  const [code, setCode] = useState("5400");
-  const [amount, setAmount] = useState("");
-  const [memo, setMemo] = useState("");
-  const [busy, setBusy] = useState(false);
-  return (
-    <div className="space-y-3">
-      <form
-        className="grid gap-3 rounded-xl bg-card p-4"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          setBusy(true);
-          try {
-            await postBusinessExpense({ data: { projectId, code, amount, date, memo, paid: true } });
-            setAmount("");
-            setMemo("");
-            toast.success("Expense posted against the bank");
-            await onSaved();
-          } catch (err) {
-            toast.error(err instanceof Error ? err.message : "Couldn't post");
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
-        <Label>Account</Label>
-        <select className="h-11 rounded-md bg-secondary px-3" value={code} onChange={(event) => setCode(event.target.value)}>
-          {accounts.map((account) => (
-            <option key={account.code} value={account.code}>{account.code} {account.name}</option>
-          ))}
-        </select>
-        <Label htmlFor="exp-amt">Amount</Label>
-        <Input id="exp-amt" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} />
-        <Label htmlFor="exp-memo">Note</Label>
-        <Input id="exp-memo" value={memo} onChange={(event) => setMemo(event.target.value)} />
-        <Button type="submit" disabled={busy}>Post paid expense</Button>
-      </form>
-      {expenses.map((expense) => (
-        <p key={expense.id} className="rounded-xl bg-card p-4 text-sm">
-          {expense.account_code} · {formatMoney(expense.amount, currency)} {expense.memo ? `· ${expense.memo}` : ""}
-        </p>
-      ))}
-    </div>
-  );
-}
-
 function Reports({
   books,
   currency,
+  projectId,
+  from,
+  to,
+  focus,
   onLearn,
 }: {
   books: {
@@ -522,7 +618,7 @@ function Reports({
     ebit: string;
     profitBeforeTax: string;
     netProfit: string;
-    opex: { name: string; amount: string }[];
+    opex: { code: string; name: string; amount: string }[];
     totalAssets: string;
     totalLiabilities: string;
     totalEquity: string;
@@ -533,64 +629,102 @@ function Reports({
     closingCash: string;
     trialDebit: string;
     trialCredit: string;
-    assets: { name: string; amount: string }[];
-    liabilities: { name: string; amount: string }[];
-    equity: { name: string; amount: string }[];
+    assets: { code: string; name: string; amount: string }[];
+    liabilities: { code: string; name: string; amount: string }[];
+    equity: { code: string; name: string; amount: string }[];
     currentEarnings: string;
   };
   currency: string;
+  projectId: string;
+  from: string;
+  to: string;
+  focus?: string | null;
   onLearn?: (concept: string) => void;
 }) {
   const money = (value: string) => formatMoney(value, currency);
+  const show = (id: string) => !focus || focus === id || ((focus === "collect" || focus === "pay") && id === "balance");
+  const [drill, setDrill] = useState<{ label: string; lines: { date: string; memo: string | null; debit: string; credit: string; source: string }[]; documents: { ref: string; who: string; open: string }[] } | null>(null);
+  const [check, setCheck] = useState<string>("");
+  async function openAccount(code: string, label: string, basis: "period" | "balance") {
+    const result = await accountActivity({ data: { projectId, code, from, to, basis } });
+    setDrill({ label, lines: result?.lines ?? [], documents: result?.documents ?? [] });
+  }
   return (
     <div className="mx-auto max-w-3xl space-y-3">
-      <p className="text-sm text-muted-foreground">Business performance. Profit and loss is what you earned and spent. The balance sheet is what the business owns and owes.</p>
-      <section className="rounded-xl bg-card p-4">
+      <p className="text-sm text-muted-foreground">Tap a figure to see the journals behind it.</p>
+      {focus === "collect" && <p className="text-sm text-muted-foreground">Customers still to collect sit in accounts receivable. Open invoices are under Sales.</p>}
+      {focus === "pay" && <p className="text-sm text-muted-foreground">Vendor bills sit in accounts payable. Team reimbursements are a separate amount owed back to people.</p>}
+      {show("pnl") && <section className="rounded-xl bg-card p-4">
         <h2 className="text-sm font-medium">Profit and loss</h2>
         <Line label="Revenue" value={money(books.totalRevenue)} hint="Money earned from sales before expenses." />
         <Line label="Gross profit" value={money(books.grossProfit)} hint={METRIC_HELP["Gross Profit"]} />
         {books.opex.map((row) => (
-          <Line key={row.name} label={row.name} value={money(row.amount)} />
+          <Line key={row.code} label={row.name} value={money(row.amount)} onOpen={() => openAccount(row.code, row.name, "period")} />
         ))}
         <Line label="Operating profit" value={money(books.ebitda)} hint="Profit from normal operations before interest, tax and depreciation. Also called EBITDA." onLearn={onLearn ? () => onLearn("ebitda") : undefined} />
         <Line label="EBIT" value={money(books.ebit)} hint={METRIC_HELP.EBIT} />
         <Line label="Profit before tax" value={money(books.profitBeforeTax)} hint={METRIC_HELP["Profit Before Tax"]} />
         <Line label="Net profit" value={money(books.netProfit)} hint={METRIC_HELP["Net Profit"]} />
-      </section>
-      <section className="rounded-xl bg-card p-4">
+      </section>}
+      {show("balance") && <section className="rounded-xl bg-card p-4">
         <h2 className="text-sm font-medium">Balance sheet</h2>
-        {books.assets.map((row) => <Line key={row.name} label={row.name} value={money(row.amount)} />)}
+        {books.assets.map((row) => <Line key={row.code} label={row.name} value={money(row.amount)} onOpen={() => openAccount(row.code, row.name, "balance")} />)}
         <Line label="Total assets" value={money(books.totalAssets)} />
-        {books.liabilities.map((row) => <Line key={row.name} label={row.name} value={money(row.amount)} />)}
+        {books.liabilities.map((row) => <Line key={row.code} label={row.name} value={money(row.amount)} onOpen={() => openAccount(row.code, row.name, "balance")} />)}
         <Line label="Total liabilities" value={money(books.totalLiabilities)} />
-        {books.equity.map((row) => <Line key={row.name} label={row.name} value={money(row.amount)} />)}
+        {books.equity.map((row) => <Line key={row.code} label={row.name} value={money(row.amount)} onOpen={() => openAccount(row.code, row.name, "balance")} />)}
         <Line label="Current earnings" value={money(books.currentEarnings)} />
         <Line label="Total equity" value={money(books.totalEquity)} />
         <p className="mt-2 text-xs text-muted-foreground">{books.ok ? "Assets equal liabilities plus equity." : "Out of balance."}</p>
-      </section>
-      <section className="rounded-xl bg-card p-4">
+      </section>}
+      {drill && (
+        <section className="rounded-xl bg-card p-4 text-sm">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="font-medium">{drill.label}</h2>
+            <button type="button" className="min-h-11 text-muted-foreground" onClick={() => setDrill(null)}>Close</button>
+          </div>
+          {drill.documents.length > 0 && (
+            <div className="mt-2">
+              <p className="text-xs text-muted-foreground">Open documents</p>
+              {drill.documents.map((row) => <p key={row.ref}>{row.who} · {row.ref.slice(0, 12)} · {money(row.open)}</p>)}
+            </div>
+          )}
+          {drill.lines.length === 0 && <p className="mt-2 text-muted-foreground">No posted lines in this view.</p>}
+          {drill.lines.map((line, index) => (
+            <p key={`${line.date}-${index}`} className="mt-1">{line.date} · {line.source} · {line.memo || "Journal"} · Dr {money(line.debit)} · Cr {money(line.credit)}</p>
+          ))}
+        </section>
+      )}
+      {show("cash") && <section className="rounded-xl bg-card p-4">
         <h2 className="text-sm font-medium">Cash flow</h2>
         <Line label="Opening cash" value={money(books.openingCash)} />
         <Line label="Operating" value={money(books.operating)} />
         <Line label="Investing" value={money(books.investing)} />
         <Line label="Financing" value={money(books.financing)} />
         <Line label="Closing cash" value={money(books.closingCash)} />
-        <p className="mt-2 text-xs text-muted-foreground">Profit is not cash. Collections move cash. Unpaid invoices do not.</p>
-      </section>
-      <section className="rounded-xl bg-card p-4">
+        <p className="mt-2 text-xs text-muted-foreground">Profit is not cash. Collections move cash. Unpaid invoices do not. Profit that is not taken out stays in the business.</p>
+      </section>}
+      {show("trial") && <section className="rounded-xl bg-card p-4">
         <h2 className="text-sm font-medium">Trial balance</h2>
         <Line label="Debits" value={money(books.trialDebit)} />
         <Line label="Credits" value={money(books.trialCredit)} />
-      </section>
+        <Button type="button" variant="secondary" className="mt-3 h-11" onClick={async () => {
+          const result = await checkBooks({ data: { projectId, today: to } });
+          setCheck(result?.ok ? "Books balance. No integrity issues." : (result?.issues.map((issue) => issue.detail).join(" ") || "Check failed"));
+        }}>Check books</Button>
+        {check && <p className="mt-2 text-xs text-muted-foreground">{check}</p>}
+      </section>}
     </div>
   );
 }
 
-function Line({ label, value, hint, onLearn }: { label: string; value: string; hint?: string; onLearn?: () => void }) {
+function Line({ label, value, hint, onLearn, onOpen }: { label: string; value: string; hint?: string; onLearn?: () => void; onOpen?: () => void }) {
   return (
     <div className="flex items-baseline justify-between gap-3 py-1.5 text-sm" title={hint}>
       <span>
-        {label}
+        {onOpen ? (
+          <button type="button" className="min-h-11 text-left underline-offset-2 hover:underline" onClick={onOpen}>{label}</button>
+        ) : label}
         {onLearn && (
           <button type="button" className="ml-2 text-xs text-muted-foreground" aria-label={`Learn about ${label}`} onClick={onLearn}>💡</button>
         )}
@@ -604,6 +738,10 @@ function EquityPanel({
   projectId,
   date,
   holders,
+  people,
+  links,
+  canLink,
+  draft,
   onSaved,
   currency,
 }: {
@@ -611,31 +749,81 @@ function EquityPanel({
   date: string;
   currency: string;
   holders: { name: string; shares: string; bps: string }[];
+  people: { userId: string; name: string; role: string }[];
+  links: { userId: string; holder: string }[];
+  canLink: boolean;
+  draft: { holder: string; linkUserId: string } | null;
   onSaved: () => Promise<void>;
 }) {
-  const [holder, setHolder] = useState("");
+  const [holder, setHolder] = useState(draft?.holder ?? "");
+  const [linkUserId, setLinkUserId] = useState(draft?.linkUserId ?? "");
   const [shares, setShares] = useState("");
   const [amount, setAmount] = useState("");
   const [investment, setInvestment] = useState("5000000");
   const [preMoney, setPreMoney] = useState("45000000");
   const [sim, setSim] = useState<string | null>(null);
+  const [setup, setSetup] = useState(holders.length > 0 || Boolean(draft));
+  useEffect(() => {
+    if (!draft) return;
+    setHolder(draft.holder);
+    setLinkUserId(draft.linkUserId);
+    setSetup(true);
+  }, [draft]);
   return (
     <div className="space-y-3">
-      <div className="rounded-xl bg-card p-4">
-        {holders.length === 0 ? <p className="text-sm text-muted-foreground">No shares issued yet.</p> : holders.map((row) => (
-          <p key={row.name} className="flex justify-between py-1 text-sm">
-            <span>{row.name}</span>
-            <span className="tabular">{row.shares} · {(Number(row.bps) / 100).toFixed(2)}%</span>
-          </p>
-        ))}
-      </div>
+      {holders.length > 0 && (
+        <div className="divide-y divide-border/60">
+          {holders.map((row) => {
+            const linkedUser = links.find((link) => link.holder === row.name)?.userId ?? "";
+            return (
+              <div key={row.name} className="py-2">
+                <p className="flex justify-between gap-3 text-sm">
+                  <span className="min-w-0 truncate">{row.name}</span>
+                  <span className="tabular">{row.shares} · {(Number(row.bps) / 100).toFixed(2)}%</span>
+                </p>
+                {canLink && (
+                  <select
+                    className="mt-2 h-11 w-full rounded-md bg-secondary px-3 text-sm"
+                    aria-label={`Link ${row.name} to a team login`}
+                    value={linkedUser}
+                    onChange={async (event) => {
+                      const linkUserId = event.target.value;
+                      if (!linkUserId) return;
+                      try {
+                        await linkBusinessStakeholder({ data: { projectId, holder: row.name, linkUserId } });
+                        toast.success("Linked. The percent still comes from shares.");
+                        await onSaved();
+                      } catch (err) {
+                        toast.error(err instanceof Error ? err.message : "Couldn't link");
+                      }
+                    }}
+                  >
+                    <option value="">Not linked to a login</option>
+                    {people.map((person) => (
+                      <option key={person.userId} value={person.userId}>{person.name} · {person.role}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {!setup && (
+        <Button type="button" className="h-11" onClick={() => setSetup(true)}>Set up ownership</Button>
+      )}
+      {setup && (
+      <>
       <form
         className="grid gap-3 rounded-xl bg-card p-4"
         onSubmit={async (event) => {
           event.preventDefault();
           try {
-            await postBusinessShares({ data: { projectId, holder, shares: Number(shares), amount: amount || null, date } });
+            await postBusinessShares({
+              data: { projectId, holder, shares: Number(shares), amount: amount || null, date, linkUserId: linkUserId || null },
+            });
             setHolder("");
+            setLinkUserId("");
             setShares("");
             setAmount("");
             toast.success("Issuance recorded");
@@ -647,11 +835,19 @@ function EquityPanel({
       >
         <Label htmlFor="holder">Shareholder</Label>
         <Input id="holder" value={holder} onChange={(event) => setHolder(event.target.value)} />
+        <Label htmlFor="share-link">Link to a team login, optional</Label>
+        <select id="share-link" className="h-11 rounded-md bg-secondary px-3" value={linkUserId} onChange={(event) => setLinkUserId(event.target.value)}>
+          <option value="">No login link</option>
+          {people.map((person) => (
+            <option key={person.userId} value={person.userId}>{person.name} · {person.role}</option>
+          ))}
+        </select>
+        <p className="text-xs text-muted-foreground">Linking does not issue shares. Percent comes from the share count you save here.</p>
         <Label htmlFor="shares">Shares</Label>
         <Input id="shares" inputMode="numeric" value={shares} onChange={(event) => setShares(event.target.value)} />
         <Label htmlFor="paid-in">Amount paid in, optional</Label>
         <Input id="paid-in" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} />
-        <Button type="submit">Issue shares</Button>
+        <Button type="submit" className="h-11">Issue shares</Button>
       </form>
       <form
         className="grid gap-3 rounded-xl bg-card p-4"
@@ -678,73 +874,9 @@ function EquityPanel({
         <Button type="submit" variant="secondary">Simulate</Button>
         {sim && <p className="text-sm">{sim}</p>}
       </form>
+      </>
+      )}
     </div>
   );
 }
 
-function ApiPanel({
-  projectId,
-  keys,
-  onSaved,
-}: {
-  projectId: string;
-  keys: { id: string; name: string; prefix: string; environment: string; revoked: boolean }[];
-  onSaved: () => Promise<void>;
-}) {
-  const [name, setName] = useState("");
-  const [scopes, setScopes] = useState<string[]>(["invoices:create", "payments:create", "reports:read"]);
-  const [token, setToken] = useState<string | null>(null);
-  return (
-    <div className="space-y-3">
-      <form
-        className="grid gap-3 rounded-xl bg-card p-4"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          try {
-            const saved = await createBusinessApiKey({ data: { projectId, name, environment: "test", scopes } });
-            setToken(saved?.token ?? null);
-            setName("");
-            toast.success("Copy the key now. It will not be shown again.");
-            await onSaved();
-          } catch (err) {
-            toast.error(err instanceof Error ? err.message : "Couldn't create a key");
-          }
-        }}
-      >
-        <p className="text-sm font-medium">API key</p>
-        <p className="text-sm text-muted-foreground">Only a hash is stored. Equity and team changes are not available on the API.</p>
-        <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Crodlin Production" />
-        <div className="grid gap-2">
-          {SCOPES.map((scope) => (
-            <label key={scope} className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={scopes.includes(scope)}
-                onChange={(event) => {
-                  setScopes((current) => event.target.checked ? [...current, scope] : current.filter((item) => item !== scope));
-                }}
-              />
-              {scope}
-            </label>
-          ))}
-        </div>
-        <Button type="submit">Create test key</Button>
-        {token && <p className="break-all rounded-md bg-secondary p-3 text-xs">{token}</p>}
-      </form>
-      {keys.map((key) => (
-        <div key={key.id} className="flex items-center justify-between gap-3 rounded-xl bg-card p-4">
-          <div>
-            <p className="text-sm font-medium">{key.name}</p>
-            <p className="text-xs text-muted-foreground">{key.prefix}… · {key.environment}{key.revoked ? " · revoked" : ""}</p>
-          </div>
-          {!key.revoked && (
-            <Button type="button" variant="ghost" className="text-expense" onClick={async () => {
-              await revokeBusinessApiKey({ data: { projectId, keyId: key.id } });
-              await onSaved();
-            }}>Revoke</Button>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}

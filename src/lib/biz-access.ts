@@ -24,6 +24,9 @@ export const BIZ_PERMISSIONS = [
   "manage_assets",
   "view_loans",
   "manage_loans",
+  "view_reimbursements",
+  "record_personal_business_expense",
+  "manage_reimbursements",
 ] as const;
 export type BizPermission = (typeof BIZ_PERMISSIONS)[number];
 
@@ -48,6 +51,9 @@ const GRANTS: Record<BizPermission, readonly BizRole[]> = {
   manage_assets: ["owner", "admin", "accountant"],
   view_loans: ["owner", "admin", "accountant", "member", "viewer"],
   manage_loans: ["owner", "admin", "accountant"],
+  view_reimbursements: ["owner", "admin", "accountant", "member", "viewer"],
+  record_personal_business_expense: ["owner", "admin", "accountant", "member"],
+  manage_reimbursements: ["owner", "admin", "accountant"],
 };
 
 export function can(role: string, permission: BizPermission) {

@@ -1,8 +1,10 @@
 import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
-import { assertInviteRole, claimInvite, inviteState, type InviteRole } from "@/lib/biz-access";
+import { assertInviteRole, claimInvite, can, inviteState, type InviteRole } from "@/lib/biz-access";
 import type { Sql } from "@/lib/db";
-import { requireBusiness } from "@/lib/server/business";
+import { accessGrantFromInvite, buildOwnershipView, ownershipDecisionWrite } from "@/lib/ownership-decision";
+import { holdersOf, loadOwnershipPeople, requireBusiness } from "@/lib/server/business";
+import { ownership } from "@/lib/cap-table";
 import { ensureUser } from "@/lib/server/ensure";
 import { publicError } from "@/lib/utils";
 
@@ -32,22 +34,10 @@ const ROLE_COPY: Record<InviteRole, string> = {
 
 export async function listTeam(sql: Sql, userId: string, projectId: string) {
   const { businessId, role } = await requireBusiness(sql, userId, projectId, "view_finance");
-  const owner = await sql<{ user_id: string; full_name: string | null; email: string | null }>`
-    select pr.user_id, p.full_name, u.email
-    from projects pr
-    join businesses b on b.project_id = pr.id
-    left join profiles p on p.id = pr.user_id
-    left join "user" u on u.id = pr.user_id
-    where b.id = ${businessId}
-  `;
-  const members = await sql<{ id: string; user_id: string; role: string; full_name: string | null; email: string | null }>`
-    select m.id, m.user_id, m.role, p.full_name, u.email
-    from biz_members m
-    left join profiles p on p.id = m.user_id
-    left join "user" u on u.id = m.user_id
-    where m.business_id = ${businessId} and m.status = 'active'
-    order by m.joined_at
-  `;
+  const holders = ownership(await holdersOf(sql, businessId));
+  const roster = await loadOwnershipPeople(sql, businessId, holders);
+  const view = buildOwnershipView({ businessName: roster.businessName, viewerRole: role, members: roster.people });
+  const canViewEquity = can(role, "view_equity");
   const invites = await sql<{ id: string; email: string | null; role: string; expires_at: string; accepted_at: string | null; revoked_at: string | null }>`
     select id, email, role, expires_at::text as expires_at, accepted_at::text as accepted_at, revoked_at::text as revoked_at
     from biz_invites where business_id = ${businessId}
@@ -57,26 +47,20 @@ export async function listTeam(sql: Sql, userId: string, projectId: string) {
   return {
     role,
     canManage: role === "owner" || role === "admin",
-    members: [
-      {
-        id: "owner",
-        userId: owner[0]?.user_id ?? "",
-        name: owner[0]?.full_name || "Owner",
-        email: owner[0]?.email ?? null,
-        role: "owner",
-        status: "active",
-        you: owner[0]?.user_id === userId,
-      },
-      ...members.map((member) => ({
-        id: member.id,
-        userId: member.user_id,
-        name: member.full_name || "Member",
-        email: member.email,
-        role: member.role,
-        status: "active",
-        you: member.user_id === userId,
-      })),
-    ],
+    canViewEquity,
+    canDecide: can(role, "manage_equity"),
+    reminder: view.reminder,
+    members: view.members.map((member, index) => ({
+      id: member.id,
+      userId: member.userId,
+      name: member.name,
+      email: roster.people[index]?.email ?? null,
+      role: member.role,
+      status: "active",
+      you: member.userId === userId,
+      ownershipLabel: canViewEquity ? member.ownershipLabel : null,
+      ownershipKind: canViewEquity ? member.ownershipKind : null,
+    })),
     invites: invites
       .map((invite) => ({
         id: invite.id,
@@ -144,6 +128,20 @@ export async function removeBizMember(sql: Sql, userId: string, projectId: strin
   if (!rows[0]) throw new Error("Member not found");
   await audit(sql, businessId, userId, "member.removed", memberId);
   return { ok: true };
+}
+
+export async function decideBizOwnership(sql: Sql, userId: string, projectId: string, memberId: string, decision: string) {
+  const { businessId } = await requireBusiness(sql, userId, projectId, "manage_equity");
+  const write = ownershipDecisionWrite(decision);
+  const rows = await sql<{ id: string }>`
+    update biz_members
+    set ownership_decision = ${write.decision}, ownership_decided_at = now()
+    where id = ${memberId} and business_id = ${businessId} and status = 'active'
+    returning id
+  `;
+  if (!rows[0]) throw new Error("Member not found");
+  await audit(sql, businessId, userId, write.decision === "none" ? "ownership.none" : "ownership.later", memberId);
+  return { ok: true, decision: write.decision };
 }
 
 export async function previewBizInvite(sql: Sql, userId: string, token: string) {
@@ -227,13 +225,14 @@ export async function acceptBizInvite(sql: Sql, userId: string, token: string) {
   claimInvite(state);
   const claimed = await sql<{ id: string }>`
     update biz_invites set accepted_at = now(), accepted_by = ${userId}
-    where id = ${invite.id} and accepted_at is null and revoked_at is null
+    where id = ${invite.id} and accepted_at is null and revoked_at is null and expires_at > now()
     returning id
   `;
   if (!claimed[0]) throw new Error("This invite was already used");
+  const grant = accessGrantFromInvite(invite.role);
   await sql`
     insert into biz_members (id, business_id, user_id, role, status)
-    values (${crypto.randomUUID()}, ${invite.business_id}, ${userId}, ${invite.role}, 'active')
+    values (${crypto.randomUUID()}, ${invite.business_id}, ${userId}, ${grant.role}, 'active')
   `;
   await audit(sql, invite.business_id, userId, "invite.accepted", invite.id);
   return { projectId: invite.project_id };
@@ -319,5 +318,17 @@ export const removeBusinessMember = createServerFn({ method: "POST" })
       return await removeBizMember(sql, context.userId, data.projectId, data.memberId);
     } catch (err) {
       publicError(err, "Couldn't remove that person.");
+    }
+  });
+
+export const decideBusinessOwnership = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; memberId: string; decision: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      return await decideBizOwnership(sql, context.userId, data.projectId, data.memberId, data.decision);
+    } catch (err) {
+      publicError(err, "Couldn't save that ownership decision.");
     }
   });

@@ -83,7 +83,6 @@ export function planAssetPurchase(cost: bigint, paid: boolean, account = "1010")
   return lines;
 }
 
-/** One straight-line month. The last month takes the remainder so the total equals cost minus residual. */
 export function depreciationAmount(cost: bigint, residual: bigint, lifeMonths: number, alreadyPosted: number) {
   if (lifeMonths < 1) throw new Error("Useful life must be at least one month");
   if (residual < 0n || residual > cost) throw new Error("Residual value can't exceed cost");
@@ -128,6 +127,14 @@ export function agingBucket(due: string, today: string) {
 
 export function budgetVariance(budget: bigint, actual: bigint) {
   return { remaining: budget - actual, over: actual > budget, variance: actual - budget };
+}
+
+export function budgetStanding(budget: bigint, actual: bigint) {
+  const variance = budgetVariance(budget, actual);
+  if (budget <= 0n) return { ...variance, percent: 0, status: actual > 0n ? ("over" as const) : ("on_track" as const) };
+  const percent = Number((actual * 10000n) / budget) / 100;
+  const status = actual > budget ? ("over" as const) : percent >= 80 ? ("near_limit" as const) : ("on_track" as const);
+  return { ...variance, percent, status };
 }
 
 export function nextRecurringDate(from: string, frequency: "weekly" | "monthly" | "quarterly" | "yearly") {
@@ -211,4 +218,44 @@ export function webhookRetryDelayMs(attempt: number) {
   const steps = [60_000, 300_000, 1_800_000, 7_200_000];
   if (attempt >= steps.length) return null;
   return steps[attempt] ?? null;
+}
+
+/** Expected schedule only. It never posts a journal. */
+export function expectedLoanSchedule(input: { principal: bigint; annualRatePercent: number; termMonths: number }) {
+  if (input.principal <= 0n || input.termMonths < 1 || input.termMonths > 360) throw new Error("Enter a principal and a term");
+  const rows: { month: number; payment: bigint; principal: bigint; interest: bigint; balance: bigint }[] = [];
+  let balance = input.principal;
+  if (input.annualRatePercent <= 0) {
+    const base = input.principal / BigInt(input.termMonths);
+    for (let month = 1; month <= input.termMonths; month += 1) {
+      const principal = month === input.termMonths ? balance : base;
+      balance -= principal;
+      rows.push({ month, payment: principal, principal, interest: 0n, balance });
+    }
+    return rows;
+  }
+  const monthlyRate = input.annualRatePercent / 12 / 100;
+  const factor = (1 + monthlyRate) ** input.termMonths;
+  const payment = BigInt(Math.round(Number(input.principal) * ((monthlyRate * factor) / (factor - 1))));
+  for (let month = 1; month <= input.termMonths; month += 1) {
+    const interest = BigInt(Math.round(Number(balance) * monthlyRate));
+    const principal = month === input.termMonths ? balance : payment - interest;
+    if (principal < 0n) throw new Error("This rate and term do not produce a valid schedule");
+    balance -= principal;
+    rows.push({ month, payment: principal + interest, principal, interest, balance: balance < 0n ? 0n : balance });
+  }
+  return rows;
+}
+
+export const ATTACHMENT_TYPES = ["application/pdf", "image/jpeg", "image/png"] as const;
+const MAX_ATTACHMENT_BYTES = 1_500_000;
+
+export function assertAttachment(mime: string, bytes: number) {
+  if (!(ATTACHMENT_TYPES as readonly string[]).includes(mime)) throw new Error("Upload a PDF, JPG, or PNG");
+  if (bytes <= 0 || bytes > MAX_ATTACHMENT_BYTES) throw new Error("That file must be under 1.5 MB");
+}
+
+export function depreciationCap(cost: bigint, residual: bigint, accumulated: bigint) {
+  const depreciable = cost - (residual < 0n ? 0n : residual > cost ? cost : residual);
+  return { ok: accumulated >= 0n && accumulated <= depreciable, cap: depreciable };
 }

@@ -5,10 +5,11 @@ import { CHART, buildStatements } from "@/lib/ledger";
 import { fromCents, parseMoney, toCents } from "@/lib/money";
 import {
   agingBucket,
-  assertCanPay,
+  assertAttachment,
   billStatus,
-  budgetVariance,
+  budgetStanding,
   depreciationAmount,
+  expectedLoanSchedule,
   nextRecurringDate,
   planAssetPurchase,
   planBillPayment,
@@ -19,11 +20,12 @@ import {
   planOpenBill,
 } from "@/lib/ops";
 import { gstOn } from "@/lib/gst";
+import { auditBooks } from "@/lib/integrity";
 import { publicError } from "@/lib/utils";
 import { audit, loadLines, postJournal, requireBusiness } from "@/lib/server/business";
 import { ensureUser } from "@/lib/server/ensure";
-import { emitBusinessEvent, retryDueWebhooks, WEBHOOK_EVENTS } from "@/lib/server/webhooks";
-import { can, type BizPermission } from "@/lib/biz-access";
+import { deliverTestPing, emitBusinessEvent, retryDueWebhooks, WEBHOOK_EVENTS } from "@/lib/server/webhooks";
+import { can, periodRange, type BizPermission } from "@/lib/biz-access";
 
 const CASH = new Set(["1000", "1010", "1020"]);
 
@@ -133,18 +135,25 @@ export async function vendorDesk(sql: Sql, businessId: string, environment: "liv
     select vendor_id, taxable::text as taxable, total::text as total, amount_paid::text as amount_paid, status, bill_date::text as bill_date
     from biz_bills where business_id = ${businessId} and environment = ${environment} and status <> 'cancelled' and status <> 'draft'
   `;
+  const payments = await sql<{ vendor_id: string; paid_on: string }>`
+    select b.vendor_id, max(p.paid_on)::text as paid_on
+    from biz_vendor_payments p
+    join biz_bills b on b.id = p.bill_id
+    where p.business_id = ${businessId} and p.environment = ${environment}
+    group by b.vendor_id
+  `;
+  const paidOn = new Map(payments.map((row) => [row.vendor_id, row.paid_on.slice(0, 10)]));
   return vendors.map((vendor) => {
     const rows = bills.filter((bill) => bill.vendor_id === vendor.id);
     let spent = 0n;
     let due = 0n;
     let overdue = 0n;
-    let last = "";
+    let last = paidOn.get(vendor.id) || "";
     for (const bill of rows) {
       spent += toCents(bill.taxable);
       const open = toCents(bill.total) - toCents(bill.amount_paid);
       if (bill.status !== "paid") due += open;
       if (bill.status === "overdue") overdue += open;
-      if (bill.bill_date > last) last = bill.bill_date.slice(0, 10);
     }
     return {
       id: vendor.id,
@@ -220,49 +229,58 @@ export async function saveBillDraft(
 }
 
 export async function postSavedBill(sql: Sql, actorId: string, businessId: string, environment: "live" | "test", billId: string) {
-  const rows = await sql<{
+  const claimed = await sql<{
     id: string;
-    status: string;
     taxable: string;
     expense_code: string;
     place_of_supply: string | null;
     bill_date: string;
     due_date: string;
   }>`
-    select id, status, taxable::text as taxable, expense_code, place_of_supply, bill_date::text as bill_date, due_date::text as due_date
-    from biz_bills where id = ${billId} and business_id = ${businessId} and environment = ${environment}
+    update biz_bills set status = 'open'
+    where id = ${billId} and business_id = ${businessId} and environment = ${environment} and status = 'draft'
+    returning id, taxable::text as taxable, expense_code, place_of_supply, bill_date::text as bill_date, due_date::text as due_date
   `;
-  const bill = rows[0];
-  if (!bill) throw new Error("Bill not found");
-  if (bill.status !== "draft") throw new Error("Only a draft can be posted");
-  const seller = await sql<{ state_code: string | null }>`select state_code from businesses where id = ${businessId}`;
-  const lines = await sql<{ gst_rate: number; taxable: string; expense_code: string }>`
-    select gst_rate, taxable::text as taxable, expense_code from biz_bill_lines where bill_id = ${billId}
-  `;
-  const journalLines = lines.flatMap((line) =>
-    planOpenBill({
-      expenseCode: line.expense_code,
-      taxable: toCents(line.taxable),
-      rate: line.gst_rate,
-      sellerState: seller[0]?.state_code ?? null,
-      placeOfSupply: bill.place_of_supply,
-    }).lines.filter((entry) => entry.code !== "2000"),
-  );
-  const credit = journalLines.reduce((sum, line) => sum + line.debit, 0n);
-  journalLines.push({ code: "2000", debit: 0n, credit });
-  const journalId = await postJournal(sql, actorId, businessId, {
-    date: bill.bill_date.slice(0, 10),
-    memo: "Bill posted",
-    source: "bill",
-    sourceId: bill.id,
-    lines: journalLines,
-    environment,
-  });
-  const status = billStatus(credit, 0n, bill.due_date.slice(0, 10), new Date().toISOString().slice(0, 10));
-  await sql`update biz_bills set status = ${status}, journal_id = ${journalId}, total = ${fromCents(credit)}::numeric where id = ${bill.id}`;
-  await audit(sql, businessId, actorId, "bill.posted", "bill", bill.id);
-  await emitBusinessEvent(sql, businessId, environment, "bill.created", { id: bill.id, total: fromCents(credit) });
-  return { id: bill.id, total: fromCents(credit), status };
+  const bill = claimed[0];
+  if (!bill) throw new Error("Only a draft can be posted");
+  try {
+    const seller = await sql<{ state_code: string | null }>`select state_code from businesses where id = ${businessId}`;
+    const lines = await sql<{ gst_rate: number; taxable: string; expense_code: string }>`
+      select gst_rate, taxable::text as taxable, expense_code from biz_bill_lines where bill_id = ${billId}
+    `;
+    const journalLines = lines.flatMap((line) =>
+      planOpenBill({
+        expenseCode: line.expense_code,
+        taxable: toCents(line.taxable),
+        rate: line.gst_rate,
+        sellerState: seller[0]?.state_code ?? null,
+        placeOfSupply: bill.place_of_supply,
+      }).lines.filter((entry) => entry.code !== "2000"),
+    );
+    const credit = journalLines.reduce((sum, line) => sum + line.debit, 0n);
+    journalLines.push({ code: "2000", debit: 0n, credit });
+    const journalId = await postJournal(sql, actorId, businessId, {
+      date: bill.bill_date.slice(0, 10),
+      memo: "Bill posted",
+      source: "bill",
+      sourceId: bill.id,
+      lines: journalLines,
+      environment,
+      exclusive: true,
+    });
+    const status = billStatus(credit, 0n, bill.due_date.slice(0, 10), new Date().toISOString().slice(0, 10));
+    await sql`update biz_bills set status = ${status}, journal_id = ${journalId}, total = ${fromCents(credit)}::numeric where id = ${bill.id}`;
+    await audit(sql, businessId, actorId, "bill.posted", "bill", bill.id);
+    try {
+      await emitBusinessEvent(sql, businessId, environment, "bill.created", { id: bill.id, total: fromCents(credit) });
+    } catch {
+      /* a failed endpoint does not undo the bill */
+    }
+    return { id: bill.id, total: fromCents(credit), status };
+  } catch (error) {
+    await sql`update biz_bills set status = 'draft' where id = ${bill.id} and journal_id is null`;
+    throw error;
+  }
 }
 
 export async function paySavedBill(
@@ -279,31 +297,47 @@ export async function paySavedBill(
   `;
   const bill = rows[0];
   if (!bill || bill.status === "draft" || bill.status === "cancelled") throw new Error("This bill is not open");
-  const open = toCents(bill.total) - toCents(bill.amount_paid);
   const amount = money(input.amount);
-  assertCanPay(open, amount);
+  const reserved = await sql<{ amount_paid: string; total: string; due_date: string }>`
+    update biz_bills
+    set amount_paid = amount_paid + ${fromCents(amount)}::numeric
+    where id = ${input.billId} and business_id = ${businessId} and environment = ${environment}
+      and status not in ('draft', 'cancelled')
+      and amount_paid + ${fromCents(amount)}::numeric <= total
+    returning amount_paid::text as amount_paid, total::text as total, due_date::text as due_date
+  `;
+  const booked = reserved[0];
+  if (!booked) throw new Error("Payment is more than the amount still due");
+  let journalId: string;
+  try {
+    journalId = await postJournal(sql, actorId, businessId, {
+      date: input.date,
+      memo: "Vendor payment",
+      source: "bill_payment",
+      sourceId: input.billId + ":" + fromCents(amount) + ":" + input.date + ":" + crypto.randomUUID(),
+      lines: planBillPayment(amount, input.accountCode),
+      environment,
+    });
+  } catch (error) {
+    await sql`
+      update biz_bills set amount_paid = amount_paid - ${fromCents(amount)}::numeric where id = ${input.billId}
+    `;
+    throw error;
+  }
+  const paid = toCents(booked.amount_paid);
+  const status = billStatus(toCents(booked.total), paid, booked.due_date.slice(0, 10), input.date);
   const paymentId = crypto.randomUUID();
-  const journalId = await postJournal(sql, actorId, businessId, {
-    date: input.date,
-    memo: "Vendor payment",
-    source: "bill_payment",
-    sourceId: paymentId,
-    lines: planBillPayment(amount, input.accountCode),
-    environment,
-  });
-  const paid = toCents(bill.amount_paid) + amount;
-  const status = billStatus(toCents(bill.total), paid, bill.due_date.slice(0, 10), input.date);
   await sql`
     insert into biz_vendor_payments (id, business_id, bill_id, amount, paid_on, method, account_code, reference, notes, journal_id, environment)
     values (
-      ${paymentId}, ${businessId}, ${bill.id}, ${fromCents(amount)}::numeric, ${input.date}::date,
+      ${paymentId}, ${businessId}, ${input.billId}, ${fromCents(amount)}::numeric, ${input.date}::date,
       ${input.method}, ${input.accountCode}, ${input.reference ?? null}, ${input.notes ?? null}, ${journalId}, ${environment}
     )
   `;
-  await sql`update biz_bills set amount_paid = ${fromCents(paid)}::numeric, status = ${status} where id = ${bill.id}`;
-  await audit(sql, businessId, actorId, "bill.payment_recorded", "bill", bill.id);
-  if (status === "paid") await emitBusinessEvent(sql, businessId, environment, "bill.paid", { id: bill.id });
-  return { status, balance: fromCents(toCents(bill.total) - paid) };
+  await sql`update biz_bills set status = ${status} where id = ${input.billId}`;
+  await audit(sql, businessId, actorId, "bill.payment_recorded", "bill", input.billId);
+  if (status === "paid") await emitBusinessEvent(sql, businessId, environment, "bill.paid", { id: input.billId });
+  return { status, balance: fromCents(toCents(booked.total) - paid) };
 }
 
 export async function moneyDesk(sql: Sql, businessId: string, environment: "live" | "test", today: string) {
@@ -374,13 +408,20 @@ export const getOpsDesk = createServerFn({ method: "POST" })
           from biz_recurring where business_id = ${businessId} and environment = 'live' and active = true order by next_date
         `).map((row) => ({ ...row, next_date: row.next_date.slice(0, 10) })),
         budgets: await budgetRows(sql, businessId, today),
-        loans: (await sql<{ id: string; lender: string; principal: string; outstanding: string; start_date: string }>`
-          select id, lender, principal::text as principal, outstanding::text as outstanding, start_date::text as start_date
+        loans: (await sql<{ id: string; lender: string; principal: string; outstanding: string; start_date: string; interest_rate: string | null; term_months: number | null }>`
+          select id, lender, principal::text as principal, outstanding::text as outstanding, start_date::text as start_date,
+                 interest_rate::text as interest_rate, term_months
           from biz_loans where business_id = ${businessId} and environment = 'live' order by start_date desc
-        `).map((row) => ({ ...row, start_date: row.start_date.slice(0, 10) })),
-        assets: (await sql<{ id: string; name: string; category: string; cost: string; residual: string; life_months: number; purchased_on: string; status: string }>`
-          select id, name, category, cost::text as cost, residual::text as residual, life_months, purchased_on::text as purchased_on, status
-          from biz_fixed_assets where business_id = ${businessId} and environment = 'live' order by purchased_on desc
+        `).map((row) => ({ ...row, start_date: row.start_date.slice(0, 10), interest_rate: row.interest_rate, term_months: row.term_months })),
+        assets: (await sql<{ id: string; name: string; category: string; cost: string; residual: string; life_months: number; purchased_on: string; status: string; accumulated: string }>`
+          select a.id, a.name, a.category, a.cost::text as cost, a.residual::text as residual, a.life_months,
+                 a.purchased_on::text as purchased_on, a.status,
+                 coalesce(sum(d.amount), 0)::text as accumulated
+          from biz_fixed_assets a
+          left join biz_depreciation_entries d on d.asset_id = a.id
+          where a.business_id = ${businessId} and a.environment = 'live'
+          group by a.id
+          order by a.purchased_on desc
         `).map((row) => ({ ...row, purchased_on: row.purchased_on.slice(0, 10) })),
         expenseAccounts: CHART.filter((account) => account.type === "expense").map((account) => ({ code: account.code, name: account.name })),
         sellerState: await sellerState(sql, businessId),
@@ -398,29 +439,33 @@ async function budgetRows(sql: Sql, businessId: string, today: string) {
   const lines = await loadLines(sql, businessId);
   return budgets.map((budget) => {
     const start = budget.period_start.slice(0, 10);
-    const end = budget.period === "year" ? today : today;
-    const books = buildStatements(lines.filter((line) => line.date >= start && line.date <= end), start, end);
+    const window = periodRange(start, budget.period === "year" || budget.period === "quarter" ? budget.period : "month");
+    const books = buildStatements(lines.filter((line) => line.date >= window.from && line.date <= window.to), window.from, window.to);
     const actual = budget.kind === "revenue"
       ? books.totalRevenue
       : budget.account_code
         ? (books.opex.find((row) => row.code === budget.account_code)?.amount ?? books.cogs.find((row) => row.code === budget.account_code)?.amount ?? 0n)
         : books.opex.reduce((sum, row) => sum + row.amount, 0n) + books.cogs.reduce((sum, row) => sum + row.amount, 0n);
-    const variance = budgetVariance(toCents(budget.amount), actual);
+    const variance = budgetStanding(toCents(budget.amount), actual);
     return {
       id: budget.id,
       name: budget.name,
       kind: budget.kind,
+      period: budget.period,
       budget: budget.amount,
       actual: fromCents(actual),
       remaining: fromCents(variance.remaining),
+      variance: fromCents(variance.variance),
       over: variance.over,
+      percent: variance.percent,
+      status: variance.status,
     };
   });
 }
 
 export const saveVendor = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((data: { projectId: string; displayName: string; vendorType?: string; email?: string | null; phone?: string | null; stateCode?: string | null; gstin?: string | null; paymentTerms?: string; expenseCode?: string | null; notes?: string | null; legalName?: string | null; city?: string | null }) => data)
+  .validator((data: { projectId: string; displayName: string; vendorType?: string; email?: string | null; phone?: string | null; stateCode?: string | null; gstin?: string | null; paymentTerms?: string; expenseCode?: string | null; notes?: string | null; legalName?: string | null; city?: string | null; billingAddress?: string | null }) => data)
   .handler(async ({ context, data }) => {
     try {
       const { sql, businessId } = await gate(context.userId, data.projectId, "manage_vendors");
@@ -441,6 +486,18 @@ export const saveBill = createServerFn({ method: "POST" })
       return draft;
     } catch (err) {
       publicError(err, "Couldn't save that bill.");
+    }
+  });
+
+export const postBill = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; billId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql, businessId } = await gate(context.userId, data.projectId, "manage_bills");
+      return await postSavedBill(sql, context.userId, businessId, "live", data.billId);
+    } catch (err) {
+      publicError(err, "Couldn't post that bill.");
     }
   });
 
@@ -525,7 +582,7 @@ export const saveBudget = createServerFn({ method: "POST" })
 
 export const receiveLoan = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((data: { projectId: string; lender: string; principal: string; date: string; accountCode: string; rate?: string | null; notes?: string | null }) => data)
+  .validator((data: { projectId: string; lender: string; principal: string; date: string; accountCode: string; rate?: string | null; termMonths?: number | null; notes?: string | null }) => data)
   .handler(async ({ context, data }) => {
     try {
       const { sql, businessId } = await gate(context.userId, data.projectId, "manage_loans");
@@ -540,8 +597,8 @@ export const receiveLoan = createServerFn({ method: "POST" })
         lines: planLoanReceipt(amount, data.accountCode),
       });
       await sql`
-        insert into biz_loans (id, business_id, lender, principal, outstanding, start_date, interest_rate, notes, journal_id, environment)
-        values (${id}, ${businessId}, ${data.lender}, ${fromCents(amount)}::numeric, ${fromCents(amount)}::numeric, ${data.date}::date, ${data.rate ? Number(data.rate) : null}, ${data.notes ?? null}, ${journalId}, 'live')
+        insert into biz_loans (id, business_id, lender, principal, outstanding, start_date, interest_rate, term_months, frequency, notes, journal_id, environment)
+        values (${id}, ${businessId}, ${data.lender}, ${fromCents(amount)}::numeric, ${fromCents(amount)}::numeric, ${data.date}::date, ${data.rate ? Number(data.rate) : null}, ${data.termMonths && data.termMonths > 0 ? Math.min(360, Math.floor(data.termMonths)) : null}, 'monthly', ${data.notes ?? null}, ${journalId}, 'live')
       `;
       await audit(sql, businessId, context.userId, "loan.created", "loan", id);
       return { id };
@@ -563,20 +620,35 @@ export const repayLoan = createServerFn({ method: "POST" })
       if (!loan) throw new Error("Loan not found");
       const principal = money(data.principal || "0");
       const interest = money(data.interest || "0");
-      if (principal > toCents(loan.outstanding)) throw new Error("Principal is more than the outstanding loan");
+      const reserved = await sql<{ outstanding: string }>`
+        update biz_loans
+        set outstanding = outstanding - ${fromCents(principal)}::numeric
+        where id = ${data.loanId} and business_id = ${businessId} and environment = 'live'
+          and outstanding >= ${fromCents(principal)}::numeric
+        returning outstanding::text as outstanding
+      `;
+      if (!reserved[0]) throw new Error("Principal is more than the outstanding loan");
       const paymentId = crypto.randomUUID();
-      const journalId = await postJournal(sql, context.userId, businessId, {
-        date: data.date,
-        memo: "Loan payment",
-        source: "loan_payment",
-        sourceId: paymentId,
-        lines: planLoanPayment(principal, interest, data.accountCode),
-      });
+      let journalId: string;
+      try {
+        journalId = await postJournal(sql, context.userId, businessId, {
+          date: data.date,
+          memo: "Loan payment",
+          source: "loan_payment",
+          sourceId: paymentId,
+          lines: planLoanPayment(principal, interest, data.accountCode),
+        });
+      } catch (error) {
+        await sql`
+          update biz_loans set outstanding = outstanding + ${fromCents(principal)}::numeric where id = ${data.loanId}
+        `;
+        throw error;
+      }
       await sql`
         insert into biz_loan_payments (id, loan_id, business_id, paid_on, principal, interest, account_code, journal_id, environment)
         values (${paymentId}, ${loan.id}, ${businessId}, ${data.date}::date, ${fromCents(principal)}::numeric, ${fromCents(interest)}::numeric, ${data.accountCode}, ${journalId}, 'live')
       `;
-      await sql`update biz_loans set outstanding = ${fromCents(toCents(loan.outstanding) - principal)}::numeric where id = ${loan.id}`;
+      await sql`update biz_loans set outstanding = ${reserved[0].outstanding}::numeric where id = ${loan.id}`;
       await audit(sql, businessId, context.userId, "loan.payment_recorded", "loan", loan.id);
       return { outstanding: fromCents(toCents(loan.outstanding) - principal) };
     } catch (err) {
@@ -629,6 +701,10 @@ export const postAssetDepreciation = createServerFn({ method: "POST" })
       const amount = depreciationAmount(toCents(asset.cost), toCents(asset.residual), asset.life_months, posted[0]?.n ?? 0);
       if (amount <= 0n) throw new Error("This asset is fully depreciated");
       const period = data.date.slice(0, 7);
+      const already = await sql<{ id: string }>`
+        select id from biz_depreciation_entries where asset_id = ${asset.id} and period = ${period}
+      `;
+      if (already[0]) throw new Error("Depreciation for this month is already posted");
       const id = crypto.randomUUID();
       const journalId = await postJournal(sql, context.userId, businessId, {
         date: data.date,
@@ -637,10 +713,17 @@ export const postAssetDepreciation = createServerFn({ method: "POST" })
         sourceId: `${asset.id}:${period}`,
         lines: planDepreciation(amount),
       });
-      await sql`
-        insert into biz_depreciation_entries (id, asset_id, business_id, period, amount, journal_id)
-        values (${id}, ${asset.id}, ${businessId}, ${period}, ${fromCents(amount)}::numeric, ${journalId})
-      `;
+      try {
+        await sql`
+          insert into biz_depreciation_entries (id, asset_id, business_id, period, amount, journal_id)
+          values (${id}, ${asset.id}, ${businessId}, ${period}, ${fromCents(amount)}::numeric, ${journalId})
+        `;
+      } catch (error) {
+        if (String(error).toLowerCase().includes("unique") || String(error).toLowerCase().includes("duplicate")) {
+          throw new Error("Depreciation for this month is already posted");
+        }
+        throw error;
+      }
       await audit(sql, businessId, context.userId, "depreciation.posted", "asset", asset.id);
       return { amount: fromCents(amount), period };
     } catch (err) {
@@ -673,6 +756,7 @@ export const postFullOpening = createServerFn({ method: "POST" })
         source: "opening_full",
         sourceId: businessId,
         lines: planned.lines,
+        exclusive: true,
       });
       await audit(sql, businessId, context.userId, "opening_balances.posted", "journal", journalId);
       return { equity: fromCents(planned.plug), journalId };
@@ -709,12 +793,11 @@ export const webhookDesk = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     try {
       const { sql, businessId } = await gate(context.userId, data.projectId, "manage_api_keys");
-      await retryDueWebhooks(sql, businessId);
       const endpoints = await sql<{ id: string; url: string; events: string; status: string }>`
         select id, url, events, status from biz_webhook_endpoints where business_id = ${businessId} and environment = 'live' order by created_at desc
       `;
-      const deliveries = await sql<{ id: string; event: string; status: string; attempts: number; http_status: number | null }>`
-        select id, event, status, attempts, http_status
+      const deliveries = await sql<{ id: string; event: string; status: string; attempts: number; http_status: number | null; duration_ms: number | null }>`
+        select id, event, status, attempts, http_status, duration_ms
         from biz_webhook_deliveries where business_id = ${businessId} order by created_at desc limit 20
       `;
       return { endpoints, deliveries, events: WEBHOOK_EVENTS };
@@ -754,3 +837,402 @@ export const rotateWebhookSecret = createServerFn({ method: "POST" })
       publicError(err, "Couldn't rotate that secret.");
     }
   });
+
+export const getVendorDetail = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; vendorId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql, businessId } = await gate(context.userId, data.projectId, "view_vendors");
+      const vendors = await sql<{
+        id: string; display_name: string; legal_name: string | null; vendor_type: string; email: string | null;
+        phone: string | null; billing_address: string | null; city: string | null; state_code: string | null;
+        gstin: string | null; payment_terms: string; status: string;
+      }>`
+        select id, display_name, legal_name, vendor_type, email, phone, billing_address, city, state_code, gstin, payment_terms, status
+        from biz_vendors where id = ${data.vendorId} and business_id = ${businessId} and environment = 'live'
+      `;
+      const vendor = vendors[0];
+      if (!vendor) throw new Error("Vendor not found");
+      const bills = await sql<{ id: string; vendor_bill_number: string | null; bill_date: string; due_date: string; total: string; amount_paid: string; status: string; taxable: string }>`
+        select id, vendor_bill_number, bill_date::text as bill_date, due_date::text as due_date, total::text as total,
+               amount_paid::text as amount_paid, status, taxable::text as taxable
+        from biz_bills where vendor_id = ${vendor.id} and business_id = ${businessId} and environment = 'live'
+        order by bill_date desc
+      `;
+      const payments = await sql<{ id: string; amount: string; paid_on: string; method: string; reference: string | null; bill_id: string }>`
+        select p.id, p.amount::text as amount, p.paid_on::text as paid_on, p.method, p.reference, p.bill_id
+        from biz_vendor_payments p
+        join biz_bills b on b.id = p.bill_id
+        where b.vendor_id = ${vendor.id} and p.business_id = ${businessId} and p.environment = 'live'
+        order by p.paid_on desc
+      `;
+      const activity = await sql<{ action: string; created_at: string; entity_id: string | null; actor: string | null }>`
+        select a.action, a.created_at::text as created_at, a.entity_id, coalesce(p.full_name, 'Someone') as actor
+        from biz_audit a
+        left join profiles p on p.id = a.actor_id
+        where a.business_id = ${businessId} and (
+          a.entity_id = ${vendor.id}
+          or a.entity_id in (select id from biz_bills where vendor_id = ${vendor.id} and business_id = ${businessId})
+        )
+        order by a.created_at desc limit 30
+      `;
+      let spent = 0n;
+      let due = 0n;
+      let overdue = 0n;
+      for (const bill of bills) {
+        if (bill.status === "draft" || bill.status === "cancelled") continue;
+        spent += toCents(bill.taxable);
+        const open = toCents(bill.total) - toCents(bill.amount_paid);
+        if (bill.status !== "paid") due += open;
+        if (bill.status === "overdue") overdue += open;
+      }
+      return {
+        vendor,
+        spent: fromCents(spent),
+        due: fromCents(due),
+        overdue: fromCents(overdue),
+        lastPayment: payments[0]?.paid_on.slice(0, 10) ?? null,
+        bills: bills.map((bill) => ({ ...bill, bill_date: bill.bill_date.slice(0, 10), due_date: bill.due_date.slice(0, 10), balance: fromCents(toCents(bill.total) - toCents(bill.amount_paid)) })),
+        payments: payments.map((payment) => ({ ...payment, paid_on: payment.paid_on.slice(0, 10) })),
+        activity: activity.map((row) => ({
+          ...row,
+          label:
+            row.action === "vendor.created" ? "Vendor created"
+            : row.action === "vendor.updated" ? "Vendor updated"
+            : row.action === "bill.posted" ? "Bill posted"
+            : row.action === "bill.payment_recorded" ? "Payment recorded"
+            : row.action === "bill.created" ? "Bill created"
+            : row.action.replaceAll("_", " ").replaceAll(".", " "),
+        })),
+      };
+    } catch (err) {
+      publicError(err, "Couldn't open that vendor.");
+    }
+  });
+
+export const addBillAttachment = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; billId: string; fileName: string; mime: string; dataUrl: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql, businessId } = await gate(context.userId, data.projectId, "manage_bills");
+      const mime = data.mime === "image/jpg" ? "image/jpeg" : data.mime;
+      const comma = data.dataUrl.indexOf(",");
+      const bytes = comma >= 0 ? Math.floor((data.dataUrl.length - comma) * 0.75) : 0;
+      assertAttachment(mime, bytes);
+      const bill = await sql<{ id: string }>`
+        select id from biz_bills where id = ${data.billId} and business_id = ${businessId} and environment = 'live'
+      `;
+      if (!bill[0]) throw new Error("Bill not found");
+      const id = crypto.randomUUID();
+      await sql`
+        insert into biz_bill_attachments (id, business_id, bill_id, file_name, mime_type, size_bytes, data_url, uploaded_by)
+        values (${id}, ${businessId}, ${data.billId}, ${data.fileName.slice(0, 180)}, ${mime}, ${bytes}, ${data.dataUrl}, ${context.userId})
+      `;
+      await audit(sql, businessId, context.userId, "bill.attachment_added", "bill", data.billId);
+      return { id, fileName: data.fileName, sizeBytes: bytes };
+    } catch (err) {
+      publicError(err, "Couldn't save that file.");
+    }
+  });
+
+export const listBillAttachments = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; billId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql, businessId } = await gate(context.userId, data.projectId, "view_bills");
+      const rows = await sql<{ id: string; file_name: string; mime_type: string; size_bytes: number; uploaded_by: string; created_at: string }>`
+        select a.id, a.file_name, a.mime_type, a.size_bytes, coalesce(p.full_name, 'Someone') as uploaded_by, a.created_at::text as created_at
+        from biz_bill_attachments a
+        join biz_bills b on b.id = a.bill_id
+        left join profiles p on p.id = a.uploaded_by
+        where a.bill_id = ${data.billId} and a.business_id = ${businessId} and b.business_id = ${businessId}
+        order by a.created_at desc
+      `;
+      return rows.map((row) => ({ ...row, created_at: row.created_at.slice(0, 10) }));
+    } catch (err) {
+      publicError(err, "Couldn't list files.");
+    }
+  });
+
+export const readBillAttachment = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; attachmentId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql, businessId } = await gate(context.userId, data.projectId, "view_bills");
+      const rows = await sql<{ file_name: string; mime_type: string; data_url: string }>`
+        select file_name, mime_type, data_url from biz_bill_attachments
+        where id = ${data.attachmentId} and business_id = ${businessId}
+      `;
+      if (!rows[0]) throw new Error("File not found");
+      return rows[0];
+    } catch (err) {
+      publicError(err, "Couldn't open that file.");
+    }
+  });
+
+export const removeBillAttachment = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; attachmentId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql, businessId } = await gate(context.userId, data.projectId, "manage_bills");
+      const rows = await sql<{ id: string; bill_id: string }>`
+        delete from biz_bill_attachments where id = ${data.attachmentId} and business_id = ${businessId} returning id, bill_id
+      `;
+      if (!rows[0]) throw new Error("File not found");
+      await audit(sql, businessId, context.userId, "bill.attachment_removed", "bill", rows[0].bill_id);
+      return { ok: true };
+    } catch (err) {
+      publicError(err, "Couldn't remove that file.");
+    }
+  });
+
+export const accountActivity = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; code: string; from: string; to: string; basis?: "period" | "balance" }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql, businessId } = await gate(context.userId, data.projectId, "view_reports");
+      const balance = data.basis === "balance";
+      const rows = balance
+        ? await sql<{ date: string; memo: string | null; debit: string; credit: string; source: string }>`
+            select e.entry_date::text as date, e.memo, l.debit::text as debit, l.credit::text as credit, e.source
+            from journal_lines l
+            join journal_entries e on e.id = l.entry_id
+            join ledger_accounts a on a.id = l.account_id
+            where e.business_id = ${businessId} and e.environment = 'live' and e.status = 'posted'
+              and a.code = ${data.code} and e.entry_date <= ${data.to}::date
+            order by e.entry_date
+          `
+        : await sql<{ date: string; memo: string | null; debit: string; credit: string; source: string }>`
+            select e.entry_date::text as date, e.memo, l.debit::text as debit, l.credit::text as credit, e.source
+            from journal_lines l
+            join journal_entries e on e.id = l.entry_id
+            join ledger_accounts a on a.id = l.account_id
+            where e.business_id = ${businessId} and e.environment = 'live' and e.status = 'posted'
+              and a.code = ${data.code} and e.entry_date >= ${data.from}::date and e.entry_date <= ${data.to}::date
+            order by e.entry_date
+          `;
+      const documents = data.code === "1100"
+        ? (await sql<{ ref: string; who: string; total: string; paid: string }>`
+            select number as ref, customer_name as who, total::text as total, amount_paid::text as paid
+            from biz_invoices
+            where business_id = ${businessId} and environment = 'live' and status not in ('draft', 'void', 'cancelled')
+            order by issue_date
+          `).map((row) => ({ ...row, open: fromCents(toCents(row.total) - toCents(row.paid)) }))
+        : data.code === "2000"
+          ? (await sql<{ ref: string; who: string; total: string; paid: string }>`
+              select b.id as ref, v.display_name as who, b.total::text as total, b.amount_paid::text as paid
+              from biz_bills b join biz_vendors v on v.id = b.vendor_id
+              where b.business_id = ${businessId} and b.environment = 'live' and b.status not in ('draft', 'cancelled')
+              order by b.bill_date
+            `).map((row) => ({ ...row, open: fromCents(toCents(row.total) - toCents(row.paid)) }))
+          : [];
+      return {
+        lines: rows.map((row) => ({ ...row, date: row.date.slice(0, 10) })),
+        documents: documents.filter((row) => toCents(row.open) > 0n),
+      };
+    } catch (err) {
+      publicError(err, "Couldn't open that account.");
+    }
+  });
+
+export async function drainDueWebhooks(sql: Sql) {
+  await sql`
+    update biz_webhook_deliveries
+    set status = 'retry'
+    where status = 'delivering' and next_retry_at is not null and next_retry_at <= now()
+  `;
+  const businesses = await sql<{ business_id: string }>`
+    select distinct business_id from biz_webhook_deliveries where status = 'retry' and next_retry_at <= now()
+  `;
+  for (const row of businesses) await retryDueWebhooks(sql, row.business_id);
+  return { drained: businesses.length };
+}
+
+export const sendTestWebhook = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; endpointId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql, businessId } = await gate(context.userId, data.projectId, "manage_api_keys");
+      const endpoints = await sql<{ id: string; url: string; secret: string; status: string }>`
+        select id, url, secret, status from biz_webhook_endpoints
+        where id = ${data.endpointId} and business_id = ${businessId} and environment = 'live'
+      `;
+      const endpoint = endpoints[0];
+      if (!endpoint || endpoint.status !== "active") throw new Error("Endpoint is not active");
+      if (!endpoint.url.startsWith("https://")) throw new Error("The endpoint must be https");
+      return await deliverTestPing(sql, businessId, endpoint);
+    } catch (err) {
+      publicError(err, "Couldn't send the test.");
+    }
+  });
+
+export const getLoanDetail = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; loanId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql, businessId } = await gate(context.userId, data.projectId, "view_loans");
+      const rows = await sql<{
+        id: string; lender: string; principal: string; outstanding: string; start_date: string;
+        interest_rate: string | null; term_months: number | null;
+      }>`
+        select id, lender, principal::text as principal, outstanding::text as outstanding, start_date::text as start_date,
+               interest_rate::text as interest_rate, term_months
+        from biz_loans where id = ${data.loanId} and business_id = ${businessId} and environment = 'live'
+      `;
+      const loan = rows[0];
+      if (!loan) throw new Error("Loan not found");
+      const payments = await sql<{ id: string; paid_on: string; principal: string; interest: string }>`
+        select id, paid_on::text as paid_on, principal::text as principal, interest::text as interest
+        from biz_loan_payments where loan_id = ${loan.id} and business_id = ${businessId} and environment = 'live'
+        order by paid_on
+      `;
+      let principalPaid = 0n;
+      let interestPaid = 0n;
+      for (const payment of payments) {
+        principalPaid += toCents(payment.principal);
+        interestPaid += toCents(payment.interest);
+      }
+      const schedule = loan.interest_rate && loan.term_months
+        ? expectedLoanSchedule({
+            principal: toCents(loan.principal),
+            annualRatePercent: Number(loan.interest_rate),
+            termMonths: loan.term_months,
+          }).map((row) => ({
+            month: row.month,
+            payment: fromCents(row.payment),
+            principal: fromCents(row.principal),
+            interest: fromCents(row.interest),
+            balance: fromCents(row.balance),
+          }))
+        : [];
+      return {
+        loan: { ...loan, start_date: loan.start_date.slice(0, 10) },
+        principalPaid: fromCents(principalPaid),
+        interestPaid: fromCents(interestPaid),
+        payments: payments.map((payment) => ({ ...payment, paid_on: payment.paid_on.slice(0, 10) })),
+        schedule,
+        scheduleNote: "Expected schedule is a preview. Posted repayments are the books.",
+      };
+    } catch (err) {
+      publicError(err, "Couldn't open that loan.");
+    }
+  });
+
+export const getAssetDetail = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; assetId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql, businessId } = await gate(context.userId, data.projectId, "view_assets");
+      const rows = await sql<{
+        id: string; name: string; category: string; cost: string; residual: string; life_months: number;
+        purchased_on: string; status: string;
+      }>`
+        select id, name, category, cost::text as cost, residual::text as residual, life_months, purchased_on::text as purchased_on, status
+        from biz_fixed_assets where id = ${data.assetId} and business_id = ${businessId} and environment = 'live'
+      `;
+      const asset = rows[0];
+      if (!asset) throw new Error("Asset not found");
+      const entries = await sql<{ id: string; period: string; amount: string }>`
+        select id, period, amount::text as amount from biz_depreciation_entries
+        where asset_id = ${asset.id} and business_id = ${businessId} order by period
+      `;
+      const accumulated = entries.reduce((sum, entry) => sum + toCents(entry.amount), 0n);
+      return {
+        asset: { ...asset, purchased_on: asset.purchased_on.slice(0, 10) },
+        accumulated: fromCents(accumulated),
+        bookValue: fromCents(toCents(asset.cost) - accumulated),
+        entries,
+        disposal: "not_supported" as const,
+      };
+    } catch (err) {
+      publicError(err, "Couldn't open that asset.");
+    }
+  });
+
+export const checkBooks = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; today: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql, businessId } = await gate(context.userId, data.projectId, "view_reports");
+      const today = data.today || new Date().toISOString().slice(0, 10);
+      const journals = await sql<{ id: string; debit: string; credit: string }>`
+        select e.id, coalesce(sum(l.debit), 0)::text as debit, coalesce(sum(l.credit), 0)::text as credit
+        from journal_entries e
+        left join journal_lines l on l.entry_id = e.id
+        where e.business_id = ${businessId} and e.status = 'posted' and e.environment = 'live'
+        group by e.id
+      `;
+      const lines = await loadLines(sql, businessId);
+      const books = buildStatements(lines, "2000-01-01", today);
+      const invoices = await sql<{ id: string; total: string; paid: string }>`
+        select id, total::text as total, amount_paid::text as paid from biz_invoices
+        where business_id = ${businessId} and environment = 'live'
+      `;
+      const bills = await sql<{ id: string; total: string; paid: string }>`
+        select id, total::text as total, amount_paid::text as paid from biz_bills
+        where business_id = ${businessId} and environment = 'live'
+      `;
+      const loans = await sql<{ id: string; principal: string; outstanding: string }>`
+        select id, principal::text as principal, outstanding::text as outstanding from biz_loans
+        where business_id = ${businessId} and environment = 'live'
+      `;
+      const assets = await sql<{ id: string; cost: string; residual: string; accumulated: string }>`
+        select a.id, a.cost::text as cost, a.residual::text as residual, coalesce(sum(d.amount), 0)::text as accumulated
+        from biz_fixed_assets a
+        left join biz_depreciation_entries d on d.asset_id = a.id
+        where a.business_id = ${businessId} and a.environment = 'live'
+        group by a.id
+      `;
+      const cross = await sql<{ n: number }>`
+        select (
+          (select count(*) from biz_bills b join biz_vendors v on v.id = b.vendor_id where b.business_id = ${businessId} and v.business_id <> b.business_id)
+          + (select count(*) from biz_vendor_payments p join biz_bills b on b.id = p.bill_id where p.business_id = ${businessId} and b.business_id <> p.business_id)
+          + (select count(*) from journal_lines l join journal_entries e on e.id = l.entry_id join ledger_accounts a on a.id = l.account_id where e.business_id = ${businessId} and a.business_id <> e.business_id)
+        )::int as n
+      `;
+      const settlements = await sql<{ n: number }>`
+        select count(*)::int as n from journal_entries
+        where business_id = ${businessId} and status = 'posted' and source in ('settlement', 'split', 'project_settlement')
+      `;
+      const testIds = await sql<{ id: string }>`
+        select id from journal_entries where business_id = ${businessId} and status = 'posted' and environment = 'test'
+      `;
+      const liveIds = new Set(lines.map((line) => line.entryId));
+      const testLinesInLive = testIds.filter((row) => liveIds.has(row.id)).length;
+      const result = auditBooks({
+        journals: journals.map((row) => ({ id: row.id, debit: toCents(row.debit), credit: toCents(row.credit) })),
+        trialDebit: books.trialDebit,
+        trialCredit: books.trialCredit,
+        assets: books.totalAssets,
+        liabilities: books.totalLiabilities,
+        equity: books.totalEquity,
+        invoices: invoices.map((row) => ({ id: row.id, total: toCents(row.total), paid: toCents(row.paid) })),
+        bills: bills.map((row) => ({ id: row.id, total: toCents(row.total), paid: toCents(row.paid) })),
+        loans: loans.map((row) => ({ id: row.id, principal: toCents(row.principal), outstanding: toCents(row.outstanding) })),
+        assetsHeld: assets.map((row) => ({
+          id: row.id,
+          cost: toCents(row.cost),
+          residual: toCents(row.residual),
+          accumulated: toCents(row.accumulated),
+        })),
+        crossBusinessRefs: cross[0]?.n ?? 0,
+        settlementJournals: settlements[0]?.n ?? 0,
+        testLinesInLive,
+      });
+      return { ok: result.ok, issues: result.issues };
+    } catch (err) {
+      publicError(err, "Couldn't check the books.");
+    }
+  });
+
+

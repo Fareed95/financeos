@@ -292,6 +292,13 @@ export async function issueDraft(sql: Sql, actorId: string, businessId: string, 
   const { invoice, lines } = await loadInvoice(sql, businessId, invoiceId, environment);
   if (invoice.status !== "draft") throw new Error("Only a draft can be issued");
   if (lines.length === 0) throw new Error("Add a line before issuing");
+  const claimed = await sql<{ id: string }>`
+    update biz_invoices set status = 'issued'
+    where id = ${invoice.id} and business_id = ${businessId} and environment = ${environment} and status = 'draft'
+    returning id
+  `;
+  if (!claimed[0]) throw new Error("Only a draft can be issued");
+  try {
   const seller = await sellerRow(sql, businessId);
   const computed = computeLines(
     lines.map((line) => ({
@@ -349,6 +356,10 @@ export async function issueDraft(sql: Sql, actorId: string, businessId: string, 
     /* delivery bookkeeping must not undo the invoice */
   }
   return { id: invoice.id, number, total: fromCents(computed.total) };
+  } catch (error) {
+    await sql`update biz_invoices set status = 'draft' where id = ${invoice.id} and journal_id is null`;
+    throw error;
+  }
 }
 
 export async function recordInvoicePayment(
@@ -362,25 +373,37 @@ export async function recordInvoicePayment(
   if (invoice.status === "draft" || invoice.status === "void" || invoice.status === "cancelled") {
     throw new Error("Issue the invoice before recording a payment");
   }
-  const total = toCents(invoice.total);
-  const paid = toCents(invoice.amount_paid);
-  const credited = toCents(invoice.amount_credited);
-  const open = openOf(total, paid, credited);
   const amount = toCents(parseMoney(input.amount));
-  if (amount > open) throw new Error("Payment is more than the balance due");
+  if (amount <= 0n) throw new Error("Enter an amount");
   const method = METHODS.includes(input.method as (typeof METHODS)[number]) ? input.method : "other";
-  const journalLines = planPaymentJournal(input.accountCode, amount);
+  const reserved = await sql<{ amount_paid: string; total: string; amount_credited: string }>`
+    update biz_invoices
+    set amount_paid = amount_paid + ${fromCents(amount)}::numeric
+    where id = ${invoice.id} and business_id = ${businessId} and environment = ${environment}
+      and status not in ('draft', 'void', 'cancelled')
+      and amount_paid + amount_credited + ${fromCents(amount)}::numeric <= total
+    returning amount_paid::text as amount_paid, total::text as total, amount_credited::text as amount_credited
+  `;
+  if (!reserved[0]) throw new Error("Payment is more than the balance due");
   const paymentId = crypto.randomUUID();
-  const journalId = await postJournal(sql, actorId, businessId, {
-    date: input.date,
-    memo: `Payment for ${invoice.number}`,
-    source: "payment",
-    sourceId: paymentId,
-    lines: journalLines,
-    environment,
-  });
-  const nextPaid = paid + amount;
-  const stillOpen = openOf(total, nextPaid, credited);
+  let journalId: string;
+  try {
+    journalId = await postJournal(sql, actorId, businessId, {
+      date: input.date,
+      memo: `Payment for ${invoice.number}`,
+      source: "payment",
+      sourceId: paymentId,
+      lines: planPaymentJournal(input.accountCode, amount),
+      environment,
+    });
+  } catch (error) {
+    await sql`
+      update biz_invoices set amount_paid = amount_paid - ${fromCents(amount)}::numeric where id = ${invoice.id}
+    `;
+    throw error;
+  }
+  const nextPaid = toCents(reserved[0].amount_paid);
+  const stillOpen = openOf(toCents(reserved[0].total), nextPaid, toCents(reserved[0].amount_credited));
   const status = stillOpen === 0n ? "paid" : "partially_paid";
   await sql`
     insert into biz_payments (id, business_id, invoice_id, amount, paid_on, journal_id, method, reference, notes, account_code, environment)

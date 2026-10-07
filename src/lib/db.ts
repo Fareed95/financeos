@@ -47,6 +47,7 @@ export interface Sql {
  */
 const globalRef = globalThis as typeof globalThis & {
   __pgSqlPromise__?: Promise<Sql>;
+  __pgPool__?: import("pg").Pool;
   __pgliteInstance__?: Promise<import("@electric-sql/pglite").PGlite>;
   __pgliteMigrateChain__?: Promise<void>;
 };
@@ -95,6 +96,7 @@ function createNeonSql(): Promise<Sql> {
     types.setTypeParser(OID_DATE, identity);
     types.setTypeParser(OID_INTERVAL, identity);
     const pool = new Pool({ connectionString: databaseUrl });
+    globalRef.__pgPool__ = pool;
     return toSql(async <T>(text: string, params: unknown[]) => {
       const res = await pool.query(text, params);
       return res.rows as T[];
@@ -131,7 +133,7 @@ async function createPgliteSql(): Promise<Sql> {
   const pg = await globalRef.__pgliteInstance__;
 
   // Apply migrations/ (the single schema source) so preview matches production.
-  // Includes income sources, recurring bills, and owned assets.
+  // Includes income sources, recurring bills, owned assets, and ownership decisions.
   // SQL is inlined by the bundler via import.meta.glob (no runtime fs); applied
   // once per filename, including invoice v2.
   // files are tracked in _migrations. The glob does not descend, so the opt-in
@@ -195,6 +197,40 @@ export function getSql(): Promise<Sql> {
     throw err;
   });
   return sqlPromise;
+}
+
+/** Pin one connection so a reimbursement cannot be applied twice. */
+export async function withTransaction<T>(fn: (sql: Sql) => Promise<T>): Promise<T> {
+  await getSql();
+  if (dbSource === "neon") {
+    const pool = globalRef.__pgPool__;
+    if (!pool) throw new Error("Database is not ready");
+    const client = await pool.connect();
+    const sql = toSql(async <TRow>(text: string, params: unknown[]) => {
+      const res = await client.query(text, params);
+      return res.rows as TRow[];
+    });
+    try {
+      await client.query("begin");
+      const result = await fn(sql);
+      await client.query("commit");
+      return result;
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  const pg = await globalRef.__pgliteInstance__;
+  if (!pg) throw new Error("Database is not ready");
+  return pg.transaction(async (tx) => {
+    const sql = toSql(async <TRow>(text: string, params: unknown[]) => {
+      const result = await tx.query<TRow>(text, params);
+      return result.rows;
+    });
+    return fn(sql);
+  });
 }
 
 /**
