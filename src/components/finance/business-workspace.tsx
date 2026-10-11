@@ -26,6 +26,34 @@ import { MoneyHub, ReimbursementDesk, SpendForm, TransferForm } from "@/componen
 
 type Section = "home" | "invoices" | "expenses" | "reports" | "equity" | "team" | "developer" | "guide" | "vendors" | "bills" | "money" | "budgets" | "loans" | "assets" | "reimbursements" | "settings";
 
+function peopleAlreadyHere(
+  data: {
+    expenses?: { payerName: string | null; memo: string | null; amount: string; payerKind?: string }[];
+    activity?: { payerName: string | null; memo: string | null; amount: string }[];
+    people?: { name: string; role: string }[];
+  },
+  currency: string,
+) {
+  const notes = new Map<string, string[]>();
+  const add = (name: string | null | undefined, note: string) => {
+    const cleaned = name?.trim();
+    if (!cleaned) return;
+    const list = notes.get(cleaned) ?? [];
+    if (note && !list.includes(note)) list.push(note);
+    notes.set(cleaned, list);
+  };
+  for (const row of data.expenses ?? []) {
+    if (row.payerKind && row.payerKind !== "personal") continue;
+    add(row.payerName, `${row.memo || "Expense"} ${formatMoney(row.amount, currency)}`);
+  }
+  for (const row of data.activity ?? []) add(row.payerName, `${row.memo || "Expense"} ${formatMoney(row.amount, currency)}`);
+  for (const person of data.people ?? []) {
+    if (person.role === "owner") continue;
+    add(person.name, "");
+  }
+  return [...notes.entries()].map(([name, list]) => ({ name, note: list.filter(Boolean).join(", ") }));
+}
+
 export function BusinessWorkspace({ projectId, projectName, currency }: { projectId: string; projectName: string; currency: string }) {
   const today = todayISO();
   const user = useCurrentUser();
@@ -496,6 +524,7 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
             <BusinessTeam
               projectId={projectId}
               name={projectName}
+              also={peopleAlreadyHere(data, currency)}
               onAssignOwnership={(draft) => {
                 setEquityDraft(draft);
                 open("equity");

@@ -16,6 +16,7 @@ import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppAccountsRouteImport } from './routes/_app/accounts'
 import { Route as AppAssistantRouteImport } from './routes/_app/assistant'
 import { Route as AppBudgetsRouteImport } from './routes/_app/budgets'
+import { Route as AppBusinessRouteImport } from './routes/_app/business'
 import { Route as AppIncomeRouteImport } from './routes/_app/income'
 import { Route as AppMoreRouteImport } from './routes/_app/more'
 import { Route as AppProjectsRouteImport } from './routes/_app/projects'
@@ -26,6 +27,8 @@ import { Route as InviteTokenRouteImport } from './routes/invite/$token'
 import { Route as SplitTokenRouteImport } from './routes/split/$token'
 import { Route as AppAccountsIndexRouteImport } from './routes/_app/accounts/index'
 import { Route as AppAccountsIdRouteImport } from './routes/_app/accounts/$id'
+import { Route as AppFamilyIndexRouteImport } from './routes/_app/family/index'
+import { Route as AppFamilyFamilyIdRouteImport } from './routes/_app/family/$familyId'
 import { Route as AppProjectsIndexRouteImport } from './routes/_app/projects/index'
 import { Route as AppProjectsIdRouteImport } from './routes/_app/projects/$id'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
@@ -64,6 +67,11 @@ const AppAssistantRoute = AppAssistantRouteImport.update({
 const AppBudgetsRoute = AppBudgetsRouteImport.update({
   id: '/budgets',
   path: '/budgets',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppBusinessRoute = AppBusinessRouteImport.update({
+  id: '/business',
+  path: '/business',
   getParentRoute: () => AppRoute,
 } as any)
 const AppIncomeRoute = AppIncomeRouteImport.update({
@@ -116,6 +124,16 @@ const AppAccountsIdRoute = AppAccountsIdRouteImport.update({
   path: '/$id',
   getParentRoute: () => AppAccountsRoute,
 } as any)
+const AppFamilyIndexRoute = AppFamilyIndexRouteImport.update({
+  id: '/family/',
+  path: '/family/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppFamilyFamilyIdRoute = AppFamilyFamilyIdRouteImport.update({
+  id: '/family/$familyId',
+  path: '/family/$familyId',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppProjectsIndexRoute = AppProjectsIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -149,6 +167,7 @@ export interface FileRoutesByFullPath {
   '/accounts': typeof AppAccountsRouteWithChildren
   '/assistant': typeof AppAssistantRoute
   '/budgets': typeof AppBudgetsRoute
+  '/business': typeof AppBusinessRoute
   '/income': typeof AppIncomeRoute
   '/more': typeof AppMoreRoute
   '/projects': typeof AppProjectsRouteWithChildren
@@ -158,11 +177,13 @@ export interface FileRoutesByFullPath {
   '/invite/$token': typeof InviteTokenRoute
   '/split/$token': typeof SplitTokenRoute
   '/accounts/$id': typeof AppAccountsIdRoute
+  '/family/$familyId': typeof AppFamilyFamilyIdRoute
   '/projects/$id': typeof AppProjectsIdRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/cron/webhooks': typeof ApiCronWebhooksRoute
   '/api/v1/$': typeof ApiV1SplatRoute
   '/accounts/': typeof AppAccountsIndexRoute
+  '/family/': typeof AppFamilyIndexRoute
   '/projects/': typeof AppProjectsIndexRoute
 }
 export interface FileRoutesByTo {
@@ -170,6 +191,7 @@ export interface FileRoutesByTo {
   '/onboarding': typeof OnboardingRoute
   '/assistant': typeof AppAssistantRoute
   '/budgets': typeof AppBudgetsRoute
+  '/business': typeof AppBusinessRoute
   '/income': typeof AppIncomeRoute
   '/more': typeof AppMoreRoute
   '/reports': typeof AppReportsRoute
@@ -179,11 +201,13 @@ export interface FileRoutesByTo {
   '/split/$token': typeof SplitTokenRoute
   '/': typeof AppIndexRoute
   '/accounts/$id': typeof AppAccountsIdRoute
+  '/family/$familyId': typeof AppFamilyFamilyIdRoute
   '/projects/$id': typeof AppProjectsIdRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/cron/webhooks': typeof ApiCronWebhooksRoute
   '/api/v1/$': typeof ApiV1SplatRoute
   '/accounts': typeof AppAccountsIndexRoute
+  '/family': typeof AppFamilyIndexRoute
   '/projects': typeof AppProjectsIndexRoute
 }
 export interface FileRoutesById {
@@ -194,6 +218,7 @@ export interface FileRoutesById {
   '/_app/accounts': typeof AppAccountsRouteWithChildren
   '/_app/assistant': typeof AppAssistantRoute
   '/_app/budgets': typeof AppBudgetsRoute
+  '/_app/business': typeof AppBusinessRoute
   '/_app/income': typeof AppIncomeRoute
   '/_app/more': typeof AppMoreRoute
   '/_app/projects': typeof AppProjectsRouteWithChildren
@@ -204,11 +229,13 @@ export interface FileRoutesById {
   '/split/$token': typeof SplitTokenRoute
   '/_app/': typeof AppIndexRoute
   '/_app/accounts/$id': typeof AppAccountsIdRoute
+  '/_app/family/$familyId': typeof AppFamilyFamilyIdRoute
   '/_app/projects/$id': typeof AppProjectsIdRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/cron/webhooks': typeof ApiCronWebhooksRoute
   '/api/v1/$': typeof ApiV1SplatRoute
   '/_app/accounts/': typeof AppAccountsIndexRoute
+  '/_app/family/': typeof AppFamilyIndexRoute
   '/_app/projects/': typeof AppProjectsIndexRoute
 }
 export interface FileRouteTypes {
@@ -220,6 +247,7 @@ export interface FileRouteTypes {
     | '/accounts'
     | '/assistant'
     | '/budgets'
+    | '/business'
     | '/income'
     | '/more'
     | '/projects'
@@ -229,11 +257,13 @@ export interface FileRouteTypes {
     | '/invite/$token'
     | '/split/$token'
     | '/accounts/$id'
+    | '/family/$familyId'
     | '/projects/$id'
     | '/api/auth/$'
     | '/api/cron/webhooks'
     | '/api/v1/$'
     | '/accounts/'
+    | '/family/'
     | '/projects/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -241,6 +271,7 @@ export interface FileRouteTypes {
     | '/onboarding'
     | '/assistant'
     | '/budgets'
+    | '/business'
     | '/income'
     | '/more'
     | '/reports'
@@ -250,11 +281,13 @@ export interface FileRouteTypes {
     | '/split/$token'
     | '/'
     | '/accounts/$id'
+    | '/family/$familyId'
     | '/projects/$id'
     | '/api/auth/$'
     | '/api/cron/webhooks'
     | '/api/v1/$'
     | '/accounts'
+    | '/family'
     | '/projects'
   id:
     | '__root__'
@@ -264,6 +297,7 @@ export interface FileRouteTypes {
     | '/_app/accounts'
     | '/_app/assistant'
     | '/_app/budgets'
+    | '/_app/business'
     | '/_app/income'
     | '/_app/more'
     | '/_app/projects'
@@ -274,11 +308,13 @@ export interface FileRouteTypes {
     | '/split/$token'
     | '/_app/'
     | '/_app/accounts/$id'
+    | '/_app/family/$familyId'
     | '/_app/projects/$id'
     | '/api/auth/$'
     | '/api/cron/webhooks'
     | '/api/v1/$'
     | '/_app/accounts/'
+    | '/_app/family/'
     | '/_app/projects/'
   fileRoutesById: FileRoutesById
 }
@@ -342,6 +378,13 @@ declare module '@tanstack/react-router' {
       path: '/budgets'
       fullPath: '/budgets'
       preLoaderRoute: typeof AppBudgetsRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/business': {
+      id: '/_app/business'
+      path: '/business'
+      fullPath: '/business'
+      preLoaderRoute: typeof AppBusinessRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/income': {
@@ -414,6 +457,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppAccountsIdRouteImport
       parentRoute: typeof AppAccountsRoute
     }
+    '/_app/family/': {
+      id: '/_app/family/'
+      path: '/family'
+      fullPath: '/family/'
+      preLoaderRoute: typeof AppFamilyIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/family/$familyId': {
+      id: '/_app/family/$familyId'
+      path: '/family/$familyId'
+      fullPath: '/family/$familyId'
+      preLoaderRoute: typeof AppFamilyFamilyIdRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/projects/': {
       id: '/_app/projects/'
       path: '/'
@@ -484,6 +541,7 @@ interface AppRouteChildren {
   AppAccountsRoute: typeof AppAccountsRouteWithChildren
   AppAssistantRoute: typeof AppAssistantRoute
   AppBudgetsRoute: typeof AppBudgetsRoute
+  AppBusinessRoute: typeof AppBusinessRoute
   AppIncomeRoute: typeof AppIncomeRoute
   AppMoreRoute: typeof AppMoreRoute
   AppProjectsRoute: typeof AppProjectsRouteWithChildren
@@ -491,12 +549,15 @@ interface AppRouteChildren {
   AppSettingsRoute: typeof AppSettingsRoute
   AppTransactionsRoute: typeof AppTransactionsRoute
   AppIndexRoute: typeof AppIndexRoute
+  AppFamilyFamilyIdRoute: typeof AppFamilyFamilyIdRoute
+  AppFamilyIndexRoute: typeof AppFamilyIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppAccountsRoute: AppAccountsRouteWithChildren,
   AppAssistantRoute: AppAssistantRoute,
   AppBudgetsRoute: AppBudgetsRoute,
+  AppBusinessRoute: AppBusinessRoute,
   AppIncomeRoute: AppIncomeRoute,
   AppMoreRoute: AppMoreRoute,
   AppProjectsRoute: AppProjectsRouteWithChildren,
@@ -504,6 +565,8 @@ const AppRouteChildren: AppRouteChildren = {
   AppSettingsRoute: AppSettingsRoute,
   AppTransactionsRoute: AppTransactionsRoute,
   AppIndexRoute: AppIndexRoute,
+  AppFamilyFamilyIdRoute: AppFamilyFamilyIdRoute,
+  AppFamilyIndexRoute: AppFamilyIndexRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)

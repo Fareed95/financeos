@@ -25,6 +25,13 @@ async function audit(sql: Sql, businessId: string, actorId: string, action: stri
   `;
 }
 
+const KINDS = ["cofounder", "team", "investor"] as const;
+export type MemberKind = (typeof KINDS)[number];
+
+function memberKind(value: string | null | undefined): MemberKind {
+  return value === "cofounder" || value === "investor" ? value : "team";
+}
+
 const ROLE_COPY: Record<InviteRole, string> = {
   admin: "Can manage most business data and the team, except the owner.",
   accountant: "Can manage transactions, invoices, expenses and reports. Not API keys or ownership.",
@@ -38,10 +45,18 @@ export async function listTeam(sql: Sql, userId: string, projectId: string) {
   const roster = await loadOwnershipPeople(sql, businessId, holders);
   const view = buildOwnershipView({ businessName: roster.businessName, viewerRole: role, members: roster.people });
   const canViewEquity = can(role, "view_equity");
-  const invites = await sql<{ id: string; email: string | null; role: string; expires_at: string; accepted_at: string | null; revoked_at: string | null }>`
-    select id, email, role, expires_at::text as expires_at, accepted_at::text as accepted_at, revoked_at::text as revoked_at
+  const invites = await sql<{ id: string; email: string | null; role: string; kind: string | null; expires_at: string; accepted_at: string | null; revoked_at: string | null }>`
+    select id, email, role, kind, expires_at::text as expires_at, accepted_at::text as accepted_at, revoked_at::text as revoked_at
     from biz_invites where business_id = ${businessId}
     order by created_at desc
+  `;
+  const paidRows = await sql<{ payer_user_id: string | null; memo: string | null; amount: string; name: string | null }>`
+    select e.payer_user_id, e.memo, e.amount::text as amount, coalesce(p.full_name, u.name) as name
+    from biz_expenses e
+    left join profiles p on p.id = e.payer_user_id
+    left join "user" u on u.id = e.payer_user_id
+    where e.business_id = ${businessId} and e.payer_kind = 'personal' and e.payer_user_id is not null
+    order by e.spent_on desc
   `;
   const now = Date.now();
   return {
@@ -60,12 +75,17 @@ export async function listTeam(sql: Sql, userId: string, projectId: string) {
       you: member.userId === userId,
       ownershipLabel: canViewEquity ? member.ownershipLabel : null,
       ownershipKind: canViewEquity ? member.ownershipKind : null,
+      kind: member.kind === "cofounder" || member.kind === "investor" ? member.kind : "team",
+      paid: paidRows
+        .filter((row) => row.payer_user_id === member.userId)
+        .map((row) => ({ memo: row.memo || "Expense", amount: row.amount })),
     })),
     invites: invites
       .map((invite) => ({
         id: invite.id,
         email: invite.email,
         role: invite.role,
+        kind: memberKind(invite.kind),
         state: inviteState({ revokedAt: invite.revoked_at, acceptedAt: invite.accepted_at, expiresAt: invite.expires_at, now }),
       }))
       .filter((invite) => invite.state !== "used"),
@@ -77,17 +97,18 @@ export async function createBizInvite(
   sql: Sql,
   userId: string,
   projectId: string,
-  input: { role: string; email?: string | null; days?: number },
+  input: { role: string; email?: string | null; days?: number; kind?: string | null },
 ) {
   const { businessId } = await requireBusiness(sql, userId, projectId, "manage_team");
   const role = assertInviteRole(input.role);
+  const kind = memberKind(input.kind);
   const days = input.days === 1 || input.days === 14 ? input.days : 7;
   const token = await newToken();
   const id = crypto.randomUUID();
   await sql`
-    insert into biz_invites (id, business_id, email, role, token_hash, invited_by, expires_at)
+    insert into biz_invites (id, business_id, email, role, kind, token_hash, invited_by, expires_at)
     values (
-      ${id}, ${businessId}, ${input.email?.trim() || null}, ${role}, ${await hashToken(token)}, ${userId},
+      ${id}, ${businessId}, ${input.email?.trim() || null}, ${role}, ${kind}, ${await hashToken(token)}, ${userId},
       now() + ${`${days} days`}::interval
     )
   `;
@@ -116,6 +137,20 @@ export async function setBizRole(sql: Sql, userId: string, projectId: string, me
   if (!rows[0]) throw new Error("Member not found");
   await audit(sql, businessId, userId, "member.role_changed", memberId);
   return { ok: true };
+}
+
+export async function setBizKind(sql: Sql, userId: string, projectId: string, memberId: string, kind: string) {
+  const { businessId, role } = await requireBusiness(sql, userId, projectId, "manage_team");
+  if (role !== "owner") throw new Error("Only the owner can set this");
+  const next = memberKind(kind);
+  const rows = await sql<{ id: string }>`
+    update biz_members set kind = ${next}
+    where id = ${memberId} and business_id = ${businessId} and status = 'active'
+    returning id
+  `;
+  if (!rows[0]) throw new Error("Member not found");
+  await audit(sql, businessId, userId, "member.kind_changed", memberId);
+  return { ok: true, kind: next };
 }
 
 export async function removeBizMember(sql: Sql, userId: string, projectId: string, memberId: string) {
@@ -197,12 +232,13 @@ export async function acceptBizInvite(sql: Sql, userId: string, token: string) {
     business_id: string;
     project_id: string;
     role: string;
+    kind: string | null;
     expires_at: string;
     accepted_at: string | null;
     revoked_at: string | null;
     owner_id: string;
   }>`
-    select i.id, i.business_id, pr.id as project_id, i.role, i.expires_at::text as expires_at,
+    select i.id, i.business_id, pr.id as project_id, i.role, i.kind, i.expires_at::text as expires_at,
            i.accepted_at::text as accepted_at, i.revoked_at::text as revoked_at, pr.user_id as owner_id
     from biz_invites i
     join businesses b on b.id = i.business_id
@@ -230,9 +266,10 @@ export async function acceptBizInvite(sql: Sql, userId: string, token: string) {
   `;
   if (!claimed[0]) throw new Error("This invite was already used");
   const grant = accessGrantFromInvite(invite.role);
+  const kind = memberKind(invite.kind);
   await sql`
-    insert into biz_members (id, business_id, user_id, role, status)
-    values (${crypto.randomUUID()}, ${invite.business_id}, ${userId}, ${grant.role}, 'active')
+    insert into biz_members (id, business_id, user_id, role, kind, status)
+    values (${crypto.randomUUID()}, ${invite.business_id}, ${userId}, ${grant.role}, ${kind}, 'active')
   `;
   await audit(sql, invite.business_id, userId, "invite.accepted", invite.id);
   return { projectId: invite.project_id };
@@ -275,7 +312,7 @@ export const getBusinessTeam = createServerFn({ method: "POST" })
 
 export const inviteBusinessMember = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((data: { projectId: string; role: string; email?: string; days?: number }) => data)
+  .validator((data: { projectId: string; role: string; email?: string; days?: number; kind?: string }) => data)
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
@@ -306,6 +343,18 @@ export const changeBusinessRole = createServerFn({ method: "POST" })
       return await setBizRole(sql, context.userId, data.projectId, data.memberId, data.role);
     } catch (err) {
       publicError(err, "Couldn't change that role.");
+    }
+  });
+
+export const changeBusinessKind = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; memberId: string; kind: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      return await setBizKind(sql, context.userId, data.projectId, data.memberId, data.kind);
+    } catch (err) {
+      publicError(err, "Couldn't change that.");
     }
   });
 

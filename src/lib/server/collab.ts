@@ -8,6 +8,8 @@ import { publicError } from "@/lib/utils";
 import { planOpenParts, saveSplitLinks, type ShareLink } from "@/lib/server/split-links";
 import { notifyProjectActivity } from "@/lib/server/notices";
 import { acceptBizInvite, previewBizInvite } from "@/lib/server/biz-team";
+import { acceptFamilyInvite, previewFamilyInvite } from "@/lib/server/family";
+import { adoptJoinedMembers } from "@/lib/server/business";
 import {
   allocateSplits,
   applyExpense,
@@ -356,6 +358,8 @@ export const previewInvite = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
+      const family = await previewFamilyInvite(sql, context.userId, data.token);
+      if (family) return family;
       const business = await previewBizInvite(sql, context.userId, data.token);
       if (business) return business;
       const rows = await sql<{
@@ -402,6 +406,8 @@ export const acceptInvite = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
+      const family = await acceptFamilyInvite(sql, context.userId, data.token);
+      if (family) return family;
       const business = await acceptBizInvite(sql, context.userId, data.token);
       if (business) return business;
       const rows = await sql<{
@@ -430,7 +436,11 @@ export const acceptInvite = createServerFn({ method: "POST" })
         where project_id = ${invite.project_id} and user_id = ${context.userId}
         order by joined_at desc limit 1
       `;
-      if (existing[0]?.status === "active") return { projectId: invite.project_id };
+      if (existing[0]?.status === "active") {
+        const linked = await sql<{ id: string }>`select id from businesses where project_id = ${invite.project_id}`;
+        if (linked[0]) await adoptJoinedMembers(sql, linked[0].id);
+        return { projectId: invite.project_id };
+      }
       if (existing[0]) {
         await sql`
           update project_members set status = 'active', role = 'member', joined_at = now()
@@ -447,6 +457,8 @@ export const acceptInvite = createServerFn({ method: "POST" })
         set accepted_at = now(), accepted_by = ${context.userId}
         where id = ${invite.id} and accepted_at is null
       `;
+      const linked = await sql<{ id: string }>`select id from businesses where project_id = ${invite.project_id}`;
+      if (linked[0]) await adoptJoinedMembers(sql, linked[0].id);
       return { projectId: invite.project_id };
     } catch (err) {
       publicError(err, "Couldn't join that project.");

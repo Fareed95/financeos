@@ -533,7 +533,74 @@ function holderPosition(name: string | null, holders: Ownership[]) {
   return { linked: true, shares: found?.shares ?? 0n, bps: found?.bps ?? 0n, holderName: cleaned };
 }
 
+/** Someone who already joined, or paid a company cost, belongs on the business team. This does not issue shares. */
+export async function adoptJoinedMembers(sql: Sql, businessId: string) {
+  const owner = await sql<{ user_id: string }>`
+    select pr.user_id
+    from businesses b
+    join projects pr on pr.id = b.project_id
+    where b.id = ${businessId}
+  `;
+  const ownerId = owner[0]?.user_id ?? "";
+  const found = await sql<{ user_id: string | null }>`
+    select m.user_id
+    from project_members m
+    join businesses b on b.project_id = m.project_id
+    where b.id = ${businessId} and m.status = 'active' and m.user_id <> ${ownerId}
+    union
+    select i.accepted_by
+    from biz_invites i
+    where i.business_id = ${businessId} and i.accepted_by is not null and i.accepted_by <> ${ownerId}
+    union
+    select i.accepted_by
+    from project_invites i
+    join businesses b on b.project_id = i.project_id
+    where b.id = ${businessId} and i.accepted_by is not null and i.accepted_by <> ${ownerId}
+    union
+    select e.payer_user_id
+    from biz_expenses e
+    where e.business_id = ${businessId} and e.payer_user_id is not null and e.payer_user_id <> ${ownerId}
+    union
+    select t.paid_by_user_id
+    from transactions t
+    join businesses b on b.project_id = t.project_id
+    where b.id = ${businessId} and t.paid_by_user_id is not null and t.paid_by_user_id <> ${ownerId}
+    union
+    select t.user_id
+    from transactions t
+    join businesses b on b.project_id = t.project_id
+    where b.id = ${businessId} and t.user_id <> ${ownerId}
+  `;
+  for (const person of found) {
+    if (!person.user_id) continue;
+    const existing = await sql<{ id: string; status: string }>`
+      select id, status from biz_members where business_id = ${businessId} and user_id = ${person.user_id}
+    `;
+    if (existing[0]?.status === "active") continue;
+    if (existing[0]) {
+      await sql`update biz_members set status = 'active' where id = ${existing[0].id}`;
+      continue;
+    }
+    try {
+      await sql`
+        insert into biz_members (id, business_id, user_id, role, kind, status)
+        values (${crypto.randomUUID()}, ${businessId}, ${person.user_id}, 'member', 'team', 'active')
+      `;
+    } catch {
+      await sql`
+        insert into biz_members (id, business_id, user_id, role, status)
+        values (${crypto.randomUUID()}, ${businessId}, ${person.user_id}, 'member', 'active')
+      `;
+    }
+  }
+}
+
 export async function loadOwnershipPeople(sql: Sql, businessId: string, holders: Ownership[]) {
+  try {
+    await adoptJoinedMembers(sql, businessId);
+  } catch (err) {
+    console.error("adoptJoinedMembers", err);
+  }
   const meta = await sql<{
     name: string;
     owner_id: string;
@@ -556,8 +623,9 @@ export async function loadOwnershipPeople(sql: Sql, businessId: string, holders:
     email: string | null;
     stakeholder_name: string | null;
     ownership_decision: string | null;
+    kind: string | null;
   }>`
-    select m.id, m.user_id, m.role, p.full_name, u.email, m.stakeholder_name, m.ownership_decision
+    select m.id, m.user_id, m.role, coalesce(p.full_name, u.name) as full_name, u.email, m.stakeholder_name, m.ownership_decision, m.kind
     from biz_members m
     left join profiles p on p.id = m.user_id
     left join "user" u on u.id = m.user_id
@@ -579,6 +647,7 @@ export async function loadOwnershipPeople(sql: Sql, businessId: string, holders:
       bps: position.bps,
       decision: null,
       holderName: position.holderName,
+      kind: "team",
     });
   }
   for (const member of members) {
@@ -594,6 +663,7 @@ export async function loadOwnershipPeople(sql: Sql, businessId: string, holders:
       bps: position.bps,
       decision: recordedDecision(member.ownership_decision),
       holderName: position.holderName,
+      kind: member.kind || "team",
     });
   }
   return { businessName: row?.name || "this business", people };
@@ -805,16 +875,31 @@ export const getBusiness = createServerFn({ method: "POST" })
           and a.code in ('3000', '3100', '3200')
       `;
       const people = await sql<{ user_id: string; name: string | null; role: string }>`
-        select pr.user_id, p.full_name as name, 'owner' as role
-        from projects pr
-        join businesses b on b.project_id = pr.id
-        left join profiles p on p.id = pr.user_id
-        where b.id = ${businessId}
-        union all
-        select m.user_id, p.full_name, m.role
-        from biz_members m
-        left join profiles p on p.id = m.user_id
-        where m.business_id = ${businessId} and m.status = 'active'
+        select user_id, name, role from (
+          select pr.user_id, p.full_name as name, 'owner' as role, 0 as rank
+          from projects pr
+          join businesses b on b.project_id = pr.id
+          left join profiles p on p.id = pr.user_id
+          where b.id = ${businessId}
+          union all
+          select m.user_id, p.full_name, m.role, 1
+          from biz_members m
+          left join profiles p on p.id = m.user_id
+          where m.business_id = ${businessId} and m.status = 'active'
+          union all
+          select m.user_id, p.full_name, m.role, 2
+          from project_members m
+          join businesses b on b.project_id = m.project_id
+          left join profiles p on p.id = m.user_id
+          where b.id = ${businessId} and m.status = 'active'
+          union all
+          select e.payer_user_id, p.full_name, 'member', 3
+          from biz_expenses e
+          left join profiles p on p.id = e.payer_user_id
+          where e.business_id = ${businessId} and e.environment = 'live' and e.payer_user_id is not null
+        ) listed
+        where user_id is not null
+        order by rank
       `;
       const owedPeople = new Set(
         expenses.filter((row) => row.payer_kind === "personal" && toCents(row.amount) > toCents(row.reimbursed) && row.payer_user_id).map((row) => row.payer_user_id),

@@ -66,7 +66,7 @@ function InvitePage() {
     <main className="grid min-h-dvh place-items-center px-6">
       <div className="w-full max-w-sm space-y-4 text-center">
         <p className="text-xs tracking-wide text-muted-foreground uppercase">
-          {invite.kind === "business" ? "You've been invited to join" : "Invited to this project"}
+          {invite.kind === "family" ? "You've been invited to a family" : invite.kind === "business" ? "You've been invited to join" : "Invited to this project"}
         </p>
         <p className="text-sm text-muted-foreground">{invite.invitedBy} invited you</p>
         <h1 className="font-display text-3xl">{invite.projectName}</h1>
@@ -87,14 +87,18 @@ function InvitePage() {
                 try {
                   const res = await acceptInvite({ data: { token } });
                   toast.success("Joined");
-                  void navigate({ to: "/projects/$id", params: { id: res?.projectId ?? invite.projectId } });
+                  if (invite.kind === "family") {
+                    void navigate({ to: "/family/$familyId", params: { familyId: res?.projectId ?? invite.projectId } });
+                  } else {
+                    void navigate({ to: "/projects/$id", params: { id: res?.projectId ?? invite.projectId } });
+                  }
                 } catch (err) {
                   toast.error(err instanceof Error ? err.message : "Couldn't join");
                   setBusy(false);
                 }
               }}
             >
-              {invite.kind === "business" ? "Join business" : "Accept"}
+              {invite.kind === "family" ? "Join family" : invite.kind === "business" ? "Join business" : "Accept"}
             </Button>
             <Button variant="secondary" className="h-11 flex-1" onClick={() => void navigate({ to: "/" })}>
               Decline
@@ -102,8 +106,10 @@ function InvitePage() {
           </div>
         )}
         {invite.state === "member" && (
-          <Button className="h-11 w-full" onClick={() => void navigate({ to: "/projects/$id", params: { id: invite.projectId } })}>
-            Open project
+          <Button className="h-11 w-full" onClick={() => void navigate(invite.kind === "family"
+            ? { to: "/family/$familyId", params: { familyId: invite.projectId } }
+            : { to: "/projects/$id", params: { id: invite.projectId } })}>
+            {invite.kind === "family" ? "Open family" : "Open project"}
           </Button>
         )}
         {invite.state !== "open" && invite.state !== "member" && (

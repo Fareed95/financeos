@@ -6,7 +6,8 @@ export type LearnCategory =
   | "Accounting"
   | "GST"
   | "Company Ownership"
-  | "Developer";
+  | "Developer"
+  | "Family";
 
 export type LearnConcept = {
   id: string;
@@ -21,6 +22,98 @@ export type LearnConcept = {
 };
 
 export const LEARN_CONCEPTS: LearnConcept[] = [
+  {
+    id: "family-money",
+    simpleName: "Family money",
+    accountingName: "Household cash",
+    category: "Family",
+    simple: "Money sitting in accounts the household shares. A person's private account is not family money.",
+    advanced: "Family cash is the sum of family accounts only. Personal balances are never added in.",
+    why: "Otherwise one person's salary account would look like it belongs to everyone.",
+    aliases: ["household cash", "family cash"],
+  },
+  {
+    id: "family-contribution",
+    simpleName: "Family contribution",
+    accountingName: "Household contribution",
+    category: "Family",
+    simple: "Money a member adds to the household. It does not mean the family owns that person's entire income.",
+    advanced: "A contribution is recorded on the family side. The member's salary can stay personal.",
+    why: "Helping at home is not the same as handing over every rupee you earn.",
+    aliases: ["added money", "household contribution"],
+  },
+  {
+    id: "shared-account",
+    simpleName: "Shared account",
+    accountingName: "Family account",
+    category: "Family",
+    simple: "An account created for the family, such as family cash or a joint account.",
+    advanced: "Personal bank accounts stay private until someone explicitly moves money into a family account.",
+    why: "Joining a family should not open someone else's bank balance.",
+    aliases: ["joint account", "family account"],
+  },
+  {
+    id: "family-budget",
+    simpleName: "Family budget",
+    accountingName: "Household budget",
+    category: "Family",
+    simple: "A monthly limit for a household cost, like groceries or electricity.",
+    advanced: "Family budgets do not change personal budgets.",
+    why: "The house can plan groceries without seeing a person's private spending.",
+    aliases: ["household budget"],
+  },
+  {
+    id: "savings-goal",
+    simpleName: "Savings goal",
+    accountingName: "Family goal",
+    category: "Family",
+    simple: "Money the household is setting aside for something, like a wedding or an emergency fund.",
+    advanced: "Moving money to a goal leaves the family account and increases the goal. It is not an expense.",
+    why: "Saving is not the same as spending.",
+    aliases: ["goal", "emergency fund"],
+  },
+  {
+    id: "family-investment",
+    simpleName: "Family investment",
+    accountingName: "Household asset",
+    category: "Family",
+    simple: "Something the family owns, with a value you type in. Kharcha does not fetch live prices.",
+    advanced: "Only assets marked as family count. Personal investments stay private.",
+    why: "A guessed market price would look more certain than it is.",
+    aliases: ["fd", "gold", "mutual fund"],
+  },
+  {
+    id: "family-liability",
+    simpleName: "Family loan",
+    accountingName: "Household liability",
+    category: "Family",
+    simple: "Money the household still owes, such as a home loan.",
+    advanced: "Personal loans are not included unless someone records them as a family loan.",
+    why: "A private loan is not the family's debt.",
+    aliases: ["emi", "home loan"],
+  },
+  {
+    id: "personal-vs-family",
+    simpleName: "Personal vs family",
+    accountingName: "Context isolation",
+    category: "Family",
+    simple: "Personal is your money. Family is the household's money. They only meet when you move or share something on purpose.",
+    advanced: "Membership does not grant a query of another member's personal accounts, salary, or projects.",
+    why: "Living together does not mean sharing every account.",
+    aliases: ["privacy"],
+  },
+  {
+    id: "family-reimbursement",
+    simpleName: "Money to return",
+    accountingName: "Family reimbursement",
+    category: "Family",
+    simple: "A family member paid a household bill themselves and asked the family to pay them back.",
+    advanced: "The expense is recorded once. Paying them back clears what is owed and reduces family money. It does not create a second expense.",
+    why: "Paying someone back is not a new grocery trip.",
+    aliases: ["reimburse", "pay back"],
+    caution: "If they meant it as their contribution, do not mark it to be paid back.",
+  },
+
   {
     id: "revenue",
     simpleName: "Revenue",

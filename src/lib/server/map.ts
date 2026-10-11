@@ -187,7 +187,16 @@ export const PROJECT_SELECT = `
   p.start_date::text as start_date, p.end_date::text as end_date,
   p.budget::text as budget, p.status, p.icon, p.is_demo,
   p.collaboration,
-  coalesce(s.total_cost, 0)::text as total_cost,
+  coalesce(
+    case when p.project_type = 'business' then nullif((
+      select sum(e.amount)
+      from biz_expenses e
+      join businesses b on b.id = e.business_id
+      where b.project_id = p.id and e.environment = 'live'
+    ), 0) end,
+    s.total_cost,
+    0
+  )::text as total_cost,
   coalesce(s.prepaid, 0)::text as prepaid,
   coalesce(s.during_trip, 0)::text as during_trip,
   coalesce(s.contributions, 0)::text as contributions,

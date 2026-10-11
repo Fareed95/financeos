@@ -14,6 +14,8 @@ export type OwnershipPerson = {
   shares: bigint;
   bps: bigint;
   decision: OwnershipDecision | null;
+  /** cofounder, team, or investor. Never a share count. */
+  kind?: string | null;
 };
 
 export type OwnershipKind = "percent" | "none" | "undecided";
@@ -38,7 +40,7 @@ export function memberOwnership(person: OwnershipPerson): { kind: OwnershipKind;
   const shares = person.linked ? person.shares : 0n;
   const bps = person.linked ? person.bps : 0n;
   if (shares > 0n) return { kind: "percent", label: formatOwnershipPercent(bps), shares };
-  if (person.role === "accountant" || person.role === "viewer" || person.role === "owner" || person.decision === "none" || person.linked) {
+  if (person.kind === "investor" || person.role === "accountant" || person.role === "viewer" || person.role === "owner" || person.decision === "none" || person.linked) {
     return { kind: "none", label: "No shares", shares: 0n };
   }
   if (person.role === "admin" || person.role === "member") return { kind: "undecided", label: "Undecided", shares: 0n };
@@ -47,6 +49,7 @@ export function memberOwnership(person: OwnershipPerson): { kind: OwnershipKind;
 
 /** Owner/admin/member invites only. Accountant and viewer are not prompted. */
 export function needsOwnershipPrompt(person: OwnershipPerson): boolean {
+  if (person.kind === "investor") return false;
   if (!PROMPT_ROLES.has(person.role)) return false;
   if (person.linked) return false;
   if (person.decision !== null) return false;

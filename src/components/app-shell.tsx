@@ -14,6 +14,7 @@ import { OfflineBanner } from "@/components/offline-banner";
 import { UserButton } from "@/lib/auth/gates";
 import { cn } from "@/lib/utils";
 import { QuickAddFab, QuickAddSheet } from "@/components/finance/quick-add";
+import { ContextSwitch, contextFromPath } from "@/components/finance/context-switch";
 import { NotifyGate } from "@/components/finance/notify-gate";
 import { useVisualKeyboard } from "@/hooks/use-visual-keyboard";
 
@@ -44,6 +45,7 @@ function isActive(pathname: string, to: string) {
 
 export function AppShell() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const context = contextFromPath(pathname);
   const kb = useVisualKeyboard();
   const isAssistant = pathname === "/assistant";
   const hideTabbar = kb > 80;
@@ -51,9 +53,12 @@ export function AppShell() {
   return (
     <div className="flex min-h-dvh bg-background text-foreground">
       <aside className="sticky top-0 hidden h-dvh w-56 shrink-0 flex-col border-r border-border px-3 py-6 md:flex">
-        <Link to="/" className="mb-8 px-3 font-display text-2xl tracking-tight">
+        <Link to="/" className="mb-4 px-3 font-display text-2xl tracking-tight">
           Kharcha
         </Link>
+        <div className="mb-6 px-1">
+          <ContextSwitch />
+        </div>
         <nav className="flex flex-1 flex-col gap-1">
           {DESKTOP.map((item) => {
             const active = isActive(pathname, item.to);
@@ -107,6 +112,7 @@ export function AppShell() {
           )}
         >
           {!isAssistant && <NotifyGate />}
+          {!isAssistant && <div className="pt-2 md:hidden"><ContextSwitch /></div>}
           <Outlet />
         </main>
       </div>
@@ -138,7 +144,7 @@ export function AppShell() {
         </ul>
       </nav>
 
-      {pathname !== "/assistant" && <QuickAddFab />}
+      {context === "personal" && pathname !== "/assistant" && <QuickAddFab />}
       <QuickAddSheet />
     </div>
   );

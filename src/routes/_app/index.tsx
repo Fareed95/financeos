@@ -36,6 +36,7 @@ function Home() {
   return (
     <div className="space-y-8 pt-4">
       <header className="fos-enter">
+        <p className="text-xs tracking-wide text-muted-foreground uppercase">Personal</p>
         <p className="mt-2 font-display text-5xl tracking-tight tabular">
           {formatMoney(stats.netWorth, currency)}
         </p>
