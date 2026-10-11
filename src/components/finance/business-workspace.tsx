@@ -3,13 +3,12 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { formatMoney, fromCents, isZero, toCents } from "@/lib/money";
 import { METRIC_HELP } from "@/lib/ledger";
-import { simulateRound } from "@/lib/cap-table";
+import { parsePercentBps, planPercentGrant, simulateRound } from "@/lib/cap-table";
 import { can } from "@/lib/biz-access";
-import { assignOwnershipIntent } from "@/lib/ownership-decision";
-import { getBusiness, linkBusinessStakeholder, postBusinessCapital, postBusinessShares } from "@/lib/server/business";
+import { assignOwnershipIntent, formatOwnershipPercent } from "@/lib/ownership-decision";
+import { getBusiness, giveBusinessPercent, postBusinessCapital } from "@/lib/server/business";
 import { decideBusinessOwnership } from "@/lib/server/biz-team";
 import { todayISO } from "@/lib/utils";
 import { InvoiceDesk } from "@/components/finance/invoice-desk";
@@ -458,12 +457,11 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
             <BusinessPageHeader title="Who owns this?" context={projectName} aside={<LearnButton compact onClick={() => openLearn("equity")} />} />
             {data.ownershipReminder && <p className="text-sm text-muted-foreground">{data.ownershipReminder}</p>}
             {data.holders.length === 0 && (
-              <BusinessEmptyState title="Ownership isn't set up yet" body="Your team can use this business without having company shares." />
+              <BusinessEmptyState title="No percent is set" body="The team can still use this business. Ownership is separate." />
             )}
             <EquityPanel
               projectId={projectId}
               date={today}
-              currency={currency}
               holders={data.holders}
               people={data.people}
               links={data.stakeholderLinks ?? []}
@@ -576,7 +574,7 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
                     openEquityFor(prompt);
                   }}
                 >
-                  Assign ownership
+                  Set a percent
                 </Button>
                 <Button
                   type="button"
@@ -585,14 +583,14 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
                   onClick={async () => {
                     try {
                       await decideBusinessOwnership({ data: { projectId, memberId: prompt.memberId, decision: "none" } });
-                      toast.success("No shares assigned");
+                      toast.success("No share");
                       await reload();
                     } catch (err) {
                       toast.error(err instanceof Error ? err.message : "Couldn't save that");
                     }
                   }}
                 >
-                  No shares
+                  No share
                 </Button>
                 <Button
                   type="button"
@@ -607,7 +605,7 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
                     }
                   }}
                 >
-                  Decide later
+                  Not now
                 </Button>
               </div>
             </div>
@@ -860,11 +858,9 @@ function EquityPanel({
   canLink,
   draft,
   onSaved,
-  currency,
 }: {
   projectId: string;
   date: string;
-  currency: string;
   holders: { name: string; shares: string; bps: string }[];
   people: { userId: string; name: string; role: string }[];
   links: { userId: string; holder: string }[];
@@ -872,126 +868,150 @@ function EquityPanel({
   draft: { holder: string; linkUserId: string } | null;
   onSaved: () => Promise<void>;
 }) {
-  const [holder, setHolder] = useState(draft?.holder ?? "");
-  const [linkUserId, setLinkUserId] = useState(draft?.linkUserId ?? "");
-  const [shares, setShares] = useState("");
-  const [amount, setAmount] = useState("");
-  const [investment, setInvestment] = useState("5000000");
-  const [preMoney, setPreMoney] = useState("45000000");
+  const founder = people.find((person) => person.role === "owner");
+  const founderName = founder?.name || "Owner";
+  const [personId, setPersonId] = useState(draft?.linkUserId || "");
+  const [other, setOther] = useState(personId ? "" : draft?.holder || "");
+  const [percent, setPercent] = useState("");
+  const [money, setMoney] = useState("");
+  const [showMoney, setShowMoney] = useState(false);
+  const [showRound, setShowRound] = useState(false);
+  const [investment, setInvestment] = useState("");
+  const [preMoney, setPreMoney] = useState("");
   const [sim, setSim] = useState<string | null>(null);
-  const [setup, setSetup] = useState(holders.length > 0 || Boolean(draft));
   useEffect(() => {
-    if (!draft) return;
-    setHolder(draft.holder);
-    setLinkUserId(draft.linkUserId);
-    setSetup(true);
+    if (!draft?.linkUserId && !draft?.holder) return;
+    setPersonId(draft.linkUserId || "other");
+    setOther(draft.linkUserId ? "" : draft.holder);
   }, [draft]);
+
+  const picked = people.find((person) => person.userId === personId);
+  const holderName = personId === "other" ? other.trim() : picked?.name || "";
+  const current = holders.map((row) => ({ name: row.name, shares: BigInt(row.shares) }));
+  let preview = "";
+  let previewError = "";
+  if (holderName && percent.trim()) {
+    try {
+      const plan = planPercentGrant({
+        holders: current,
+        holder: holderName,
+        targetBps: parsePercentBps(percent),
+        founderName,
+      });
+      preview = plan.after.map((row) => `${row.name} ${formatOwnershipPercent(row.bps)}`).join(" · ");
+    } catch (err) {
+      previewError = err instanceof Error ? err.message : "Check that percent";
+    }
+  }
+
+  async function give(nextHolder: string, nextPercent: string, linkUserId: string | null, amount: string | null) {
+    await giveBusinessPercent({
+      data: { projectId, holder: nextHolder, percent: nextPercent, date, linkUserId, amount },
+    });
+    setPercent("");
+    setMoney("");
+    setPersonId("");
+    setOther("");
+    toast.success("Percent saved");
+    await onSaved();
+  }
+
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       {holders.length > 0 && (
         <div className="divide-y divide-border/60">
           {holders.map((row) => {
-            const linkedUser = links.find((link) => link.holder === row.name)?.userId ?? "";
+            const linked = links.find((link) => link.holder === row.name)?.userId ?? "";
             return (
-              <div key={row.name} className="py-2">
-                <p className="flex justify-between gap-3 text-sm">
-                  <span className="min-w-0 truncate">{row.name}</span>
-                  <span className="tabular">{row.shares} · {(Number(row.bps) / 100).toFixed(2)}%</span>
-                </p>
-                {canLink && (
-                  <select
-                    className="mt-2 h-11 w-full rounded-md bg-secondary px-3 text-sm"
-                    aria-label={`Link ${row.name} to a team login`}
-                    value={linkedUser}
-                    onChange={async (event) => {
-                      const linkUserId = event.target.value;
-                      if (!linkUserId) return;
-                      try {
-                        await linkBusinessStakeholder({ data: { projectId, holder: row.name, linkUserId } });
-                        toast.success("Linked. The percent still comes from shares.");
-                        await onSaved();
-                      } catch (err) {
-                        toast.error(err instanceof Error ? err.message : "Couldn't link");
-                      }
-                    }}
-                  >
-                    <option value="">Not linked to a login</option>
-                    {people.map((person) => (
-                      <option key={person.userId} value={person.userId}>{person.name} · {person.role}</option>
-                    ))}
-                  </select>
-                )}
+              <div key={row.name} className="flex items-center justify-between gap-3 py-3">
+                <div className="min-w-0">
+                  <p className="truncate font-medium">{row.name}</p>
+                  {!linked && <p className="text-xs text-muted-foreground">Not tied to a login</p>}
+                </div>
+                <p className="font-display text-2xl tabular">{formatOwnershipPercent(BigInt(row.bps))}</p>
               </div>
             );
           })}
         </div>
       )}
-      {!setup && (
-        <Button type="button" className="h-11" onClick={() => setSetup(true)}>Set up ownership</Button>
+      {canLink && holders.length === 0 && (
+        <Button
+          type="button"
+          className="h-11"
+          onClick={async () => {
+            try {
+              await give(founderName, "100", founder?.userId ?? null, null);
+            } catch (err) {
+              toast.error(err instanceof Error ? err.message : "Couldn't save");
+            }
+          }}
+        >
+          I own all of it
+        </Button>
       )}
-      {setup && (
-      <>
-      <form
-        className="grid gap-3 rounded-xl bg-card p-4"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          try {
-            await postBusinessShares({
-              data: { projectId, holder, shares: Number(shares), amount: amount || null, date, linkUserId: linkUserId || null },
-            });
-            setHolder("");
-            setLinkUserId("");
-            setShares("");
-            setAmount("");
-            toast.success("Issuance recorded");
-            await onSaved();
-          } catch (err) {
-            toast.error(err instanceof Error ? err.message : "Couldn't issue");
-          }
-        }}
-      >
-        <Label htmlFor="holder">Shareholder</Label>
-        <Input id="holder" value={holder} onChange={(event) => setHolder(event.target.value)} />
-        <Label htmlFor="share-link">Link to a team login, optional</Label>
-        <select id="share-link" className="h-11 rounded-md bg-secondary px-3" value={linkUserId} onChange={(event) => setLinkUserId(event.target.value)}>
-          <option value="">No login link</option>
-          {people.map((person) => (
-            <option key={person.userId} value={person.userId}>{person.name} · {person.role}</option>
-          ))}
-        </select>
-        <p className="text-xs text-muted-foreground">Linking does not issue shares. Percent comes from the share count you save here.</p>
-        <Label htmlFor="shares">Shares</Label>
-        <Input id="shares" inputMode="numeric" value={shares} onChange={(event) => setShares(event.target.value)} />
-        <Label htmlFor="paid-in">Amount paid in, optional</Label>
-        <Input id="paid-in" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} />
-        <Button type="submit" className="h-11">Issue shares</Button>
-      </form>
-      <form
-        className="grid gap-3 rounded-xl bg-card p-4"
-        onSubmit={(event) => {
-          event.preventDefault();
-          try {
-            const round = simulateRound(
-              holders.map((row) => ({ name: row.name, shares: BigInt(row.shares) })),
-              toCents(investment),
-              toCents(preMoney),
-            );
-            setSim(`${round.holders.map((row) => `${row.name} ${(Number(row.bps) / 100).toFixed(2)}%`).join(" · ")}. Post-money ${formatMoney(fromCents(round.postMoney), currency)}. Not saved.`);
-          } catch (err) {
-            toast.error(err instanceof Error ? err.message : "Can't simulate");
-          }
-        }}
-      >
-        <p className="text-sm font-medium">Dilution simulator</p>
-        <p className="text-sm text-muted-foreground">This does not change the cap table.</p>
-        <Label htmlFor="invest">Investment</Label>
-        <Input id="invest" value={investment} onChange={(event) => setInvestment(event.target.value)} />
-        <Label htmlFor="pre">Pre-money valuation</Label>
-        <Input id="pre" value={preMoney} onChange={(event) => setPreMoney(event.target.value)} />
-        <Button type="submit" variant="secondary">Simulate</Button>
-        {sim && <p className="text-sm">{sim}</p>}
-      </form>
-      </>
+      {canLink && (
+        <form
+          className="grid gap-3"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            try {
+              if (!holderName || previewError) throw new Error(previewError || "Choose a person and a percent");
+              await give(holderName, percent, personId === "other" ? null : personId || null, showMoney ? money || null : null);
+            } catch (err) {
+              toast.error(err instanceof Error ? err.message : "Couldn't save");
+            }
+          }}
+        >
+          <p className="text-sm font-medium">Give a percent</p>
+          <select
+            className="h-11 rounded-md bg-secondary px-3 text-base"
+            aria-label="Who"
+            value={personId}
+            onChange={(event) => setPersonId(event.target.value)}
+          >
+            <option value="">Choose a person</option>
+            {people.map((person) => (
+              <option key={person.userId} value={person.userId}>{person.name}</option>
+            ))}
+            <option value="other">Someone else</option>
+          </select>
+          {personId === "other" && (
+            <Input placeholder="Their name" value={other} onChange={(event) => setOther(event.target.value)} aria-label="Their name" />
+          )}
+          <Input inputMode="decimal" placeholder="Percent, like 40" value={percent} onChange={(event) => setPercent(event.target.value)} aria-label="Percent" />
+          {preview && <p className="text-sm text-muted-foreground">After this: {preview}</p>}
+          {previewError && <p className="text-sm text-expense">{previewError}</p>}
+          <button type="button" className="h-11 text-left text-sm text-muted-foreground" onClick={() => setShowMoney((open) => !open)}>
+            {showMoney ? "Hide money they put in" : "They also put money in"}
+          </button>
+          {showMoney && (
+            <Input inputMode="decimal" placeholder="Amount" value={money} onChange={(event) => setMoney(event.target.value)} aria-label="Amount paid in" />
+          )}
+          <Button type="submit" className="h-11" disabled={!preview}>Give percent</Button>
+        </form>
+      )}
+      <button type="button" className="h-11 text-sm text-muted-foreground" onClick={() => setShowRound((open) => !open)}>
+        {showRound ? "Hide investor example" : "What if an investor joins later?"}
+      </button>
+      {showRound && (
+        <form
+          className="grid gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            try {
+              const round = simulateRound(current, toCents(investment), toCents(preMoney));
+              setSim(`${round.holders.map((row) => `${row.name} ${formatOwnershipPercent(row.bps)}`).join(" · ")}. This is only an example.`);
+            } catch (err) {
+              toast.error(err instanceof Error ? err.message : "Can't show that");
+            }
+          }}
+        >
+          <p className="text-sm text-muted-foreground">An example only. Nothing is saved.</p>
+          <Input inputMode="decimal" placeholder="Money they put in" value={investment} onChange={(event) => setInvestment(event.target.value)} aria-label="Investment" />
+          <Input inputMode="decimal" placeholder="What the company is worth before that" value={preMoney} onChange={(event) => setPreMoney(event.target.value)} aria-label="Value before investment" />
+          <Button type="submit" variant="secondary" className="h-11">Show example</Button>
+          {sim && <p className="text-sm">{sim}</p>}
+        </form>
       )}
     </div>
   );

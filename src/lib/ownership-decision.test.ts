@@ -41,17 +41,17 @@ test("invite accepted does not issue shares or split ownership", () => {
     viewerRole: "owner",
     members: [fareed, aamir, zaid],
   });
-  assert.equal(joined.members.find((member) => member.name === "Aamir")?.ownershipLabel, "Undecided");
+  assert.equal(joined.members.find((member) => member.name === "Aamir")?.ownershipLabel, "No percent yet");
   assert.equal(joined.members.every((member) => member.ownershipLabel !== "50%" && member.ownershipLabel !== "33.33%"), true);
 });
 
 test("an eligible admin or member gets one ownership prompt until a decision is recorded", () => {
   const open = buildOwnershipView({ businessName: "Munafa", viewerRole: "owner", members: [fareed, aamir, zaid] });
-  assert.equal(open.prompt?.title, "Set ownership for Aamir?");
-  assert.equal(open.prompt?.body, "Aamir has joined Munafa as a team member, but no company ownership has been assigned.");
+  assert.equal(open.prompt?.title, "Does Aamir own part of Munafa?");
+  assert.equal(open.prompt?.body, "They can use Munafa without owning it. Set a percent only if they should.");
   assert.equal(open.prompt?.memberId, "aamir-member");
   assert.equal(open.members.find((member) => member.name === "Fareed")?.ownershipLabel, "60%");
-  assert.equal(open.members.find((member) => member.name === "Aamir")?.ownershipLabel, "Undecided");
+  assert.equal(open.members.find((member) => member.name === "Aamir")?.ownershipLabel, "No percent yet");
   assert.equal(open.members.find((member) => member.name === "Zaid")?.ownershipLabel, "No shares");
   const memberToo = buildOwnershipView({
     businessName: "Munafa",
@@ -93,8 +93,8 @@ test("decide later hides the prompt and leaves a subtle reminder", () => {
   });
   assert.equal(onlyLater.prompt, null);
   assert.equal(onlyLater.undecided, 1);
-  assert.equal(onlyLater.reminder, "1 team member has ownership undecided");
-  assert.equal(onlyLater.members.find((member) => member.name === "Aamir")?.ownershipLabel, "Undecided");
+  assert.equal(onlyLater.reminder, "1 person has no percent yet");
+  assert.equal(onlyLater.members.find((member) => member.name === "Aamir")?.ownershipLabel, "No percent yet");
   const two = buildOwnershipView({
     businessName: "Munafa",
     viewerRole: "admin",
@@ -104,7 +104,7 @@ test("decide later hides the prompt and leaves a subtle reminder", () => {
     ],
   });
   assert.equal(two.prompt, null);
-  assert.equal(two.reminder, "2 team members have ownership undecided");
+  assert.equal(two.reminder, "2 people have no percent yet");
 });
 
 test("assign ownership opens the equity flow and does not issue shares", () => {
@@ -160,7 +160,7 @@ test("reimbursement, personal payments, headcount, and role do not create owners
     viewerRole: "owner",
     members: [{ ...aamir, shares: activity.shares, decision: activity.decision, linked: false }],
   });
-  assert.equal(view.members[0]?.ownershipLabel, "Undecided");
+  assert.equal(view.members[0]?.ownershipLabel, "No percent yet");
   assert.equal(view.members[0]?.shares, 0n);
   assert.notEqual(view.members[0]?.ownershipLabel, "33.33%");
   const unlinkedShares = buildOwnershipView({
@@ -168,5 +168,5 @@ test("reimbursement, personal payments, headcount, and role do not create owners
     viewerRole: "owner",
     members: [{ ...aamir, linked: false, shares: 300_000n, bps: 3000n }],
   });
-  assert.equal(unlinkedShares.members[0]?.ownershipLabel, "Undecided");
+  assert.equal(unlinkedShares.members[0]?.ownershipLabel, "No percent yet");
 });

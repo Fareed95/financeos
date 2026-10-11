@@ -11,10 +11,20 @@ import {
   removeBusinessMember,
   revokeBusinessInvite,
 } from "@/lib/server/biz-team";
-import { assignOwnershipIntent } from "@/lib/ownership-decision";
+import { formatOwnershipPercent } from "@/lib/ownership-decision";
+import { parsePercentBps, planPercentGrant } from "@/lib/cap-table";
+import { giveBusinessPercent } from "@/lib/server/business";
+import { todayISO } from "@/lib/utils";
 import { formatMoney } from "@/lib/money";
 
-const ROLES = ["admin", "accountant", "member", "viewer"] as const;
+const ROLES = ["member", "admin", "accountant", "viewer"] as const;
+const ROLE_LABEL: Record<string, string> = {
+  owner: "Runs this",
+  admin: "Can manage",
+  member: "Can add records",
+  accountant: "Can see the books",
+  viewer: "Can only look",
+};
 const KINDS = [
   { id: "cofounder", label: "Co-founder" },
   { id: "team", label: "Team member" },
@@ -23,6 +33,70 @@ const KINDS = [
 
 function kindLabel(kind: string) {
   return KINDS.find((item) => item.id === kind)?.label ?? "Team member";
+}
+
+function PercentGrant({
+  projectId,
+  holder,
+  userId,
+  founderName,
+  holders,
+  onSaved,
+}: {
+  projectId: string;
+  holder: string;
+  userId: string;
+  founderName: string;
+  holders: { name: string; shares: string }[];
+  onSaved: () => Promise<void>;
+}) {
+  const [percent, setPercent] = useState("");
+  const current = holders.map((row) => ({ name: row.name, shares: BigInt(row.shares) }));
+  let preview = "";
+  let error = "";
+  if (percent.trim()) {
+    try {
+      const plan = planPercentGrant({
+        holders: current,
+        holder,
+        targetBps: parsePercentBps(percent),
+        founderName,
+      });
+      preview = plan.after.map((row) => `${row.name} ${formatOwnershipPercent(row.bps)}`).join(" · ");
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Enter a percent like 33";
+    }
+  }
+  return (
+    <form
+      className="mt-3 grid gap-2"
+      onSubmit={async (event) => {
+        event.preventDefault();
+        try {
+          if (!preview) throw new Error(error || "Enter a percent");
+          await giveBusinessPercent({
+            data: { projectId, holder, percent, date: todayISO(), linkUserId: userId },
+          });
+          setPercent("");
+          toast.success(preview);
+          await onSaved();
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : "Couldn't save that percent");
+        }
+      }}
+    >
+      <Input
+        inputMode="decimal"
+        placeholder="His percent, like 33"
+        aria-label={`Percent for ${holder}`}
+        value={percent}
+        onChange={(event) => setPercent(event.target.value)}
+      />
+      {preview && <p className="text-sm text-muted-foreground">After this: {preview}</p>}
+      {error && <p className="text-sm text-expense">{error}</p>}
+      <Button type="submit" className="h-11" disabled={!preview}>Save percent</Button>
+    </form>
+  );
 }
 
 export function BusinessTeam({
@@ -61,10 +135,10 @@ export function BusinessTeam({
       <div>
         <p className="text-xs text-muted-foreground">Business</p>
         <h2 className="font-display text-[1.65rem] leading-tight">Team</h2>
-        <p className="mt-1 text-sm text-muted-foreground">People who can access {name}.</p>
+        <p className="mt-1 text-sm text-muted-foreground">Who can open {name}. A percent of the company is separate.</p>
       </div>
       <p className="text-sm text-muted-foreground">{count} member{count === 1 ? "" : "s"} · {pending.filter((invite) => invite.state === "open").length} pending invite{pending.filter((invite) => invite.state === "open").length === 1 ? "" : "s"}</p>
-      <p className="text-sm text-muted-foreground">Access is not company ownership. Co-founder, team member, and investor are labels. They do not give shares.</p>
+      <p className="text-sm text-muted-foreground">Inviting someone does not give them a percent.</p>
       {data.reminder && <p className="text-sm text-muted-foreground">{data.reminder}</p>}
       <div className="grid grid-cols-3 gap-2">
         {(["all", "members", "pending"] as const).map((item) => (
@@ -91,13 +165,15 @@ export function BusinessTeam({
         >
           <p className="text-sm font-medium">Invite to {name}</p>
           <Input type="email" value={email} placeholder="Email" onChange={(event) => setEmail(event.target.value)} />
-          <select className="h-11 rounded-md bg-secondary px-3 text-base" value={kind} onChange={(event) => setKind(event.target.value as (typeof KINDS)[number]["id"])} aria-label="Place">
+          <p className="text-sm text-muted-foreground">Who they are</p>
+          <select className="h-11 rounded-md bg-secondary px-3 text-base" value={kind} onChange={(event) => setKind(event.target.value as (typeof KINDS)[number]["id"])} aria-label="Who they are">
             {KINDS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
           </select>
-          <select className="h-11 rounded-md bg-secondary px-3 text-base" value={role} onChange={(event) => setRole(event.target.value as (typeof ROLES)[number])} aria-label="Access">
-            {ROLES.map((item) => <option key={item} value={item}>{item}</option>)}
+          <p className="text-sm text-muted-foreground">What they can do</p>
+          <select className="h-11 rounded-md bg-secondary px-3 text-base" value={role} onChange={(event) => setRole(event.target.value as (typeof ROLES)[number])} aria-label="What they can do">
+            {ROLES.map((item) => <option key={item} value={item}>{ROLE_LABEL[item]}</option>)}
           </select>
-          <p className="text-sm text-muted-foreground">{kindLabel(kind)}. {data.roleCopy[role]} This invite does not give shares.</p>
+          <p className="text-sm text-muted-foreground">{kindLabel(kind)}. {data.roleCopy[role]} No percent is given.</p>
           <select className="h-11 rounded-md bg-secondary px-3" value={days} onChange={(event) => setDays(Number(event.target.value))}>
             <option value={1}>24 hours</option>
             <option value={7}>7 days</option>
@@ -106,6 +182,17 @@ export function BusinessTeam({
           <Button type="submit" className="h-11">Create invite</Button>
           {link && <p className="break-all text-xs text-muted-foreground">{link}</p>}
         </form>
+      )}
+      {data.canViewEquity && (data.holders ?? []).length > 0 && (
+        <div className="space-y-2">
+          <p className="text-sm font-medium">Who owns the company</p>
+          {(data.holders ?? []).map((holder) => (
+            <p key={holder.name} className="flex items-baseline justify-between gap-3">
+              <span className="min-w-0 truncate text-sm">{holder.name}</span>
+              <span className="font-display text-2xl tabular">{holder.percent}</span>
+            </p>
+          ))}
+        </div>
       )}
       {showMembers && count === 1 && data.members.every((member) => (member.paid ?? []).length === 0) && extra.length === 0 && (
         <div className="rounded-xl bg-card p-4">
@@ -123,41 +210,28 @@ export function BusinessTeam({
               </p>
             )}
             {data.canViewEquity ? (
-              <div className="mt-2 grid grid-cols-3 gap-2">
-                <div>
-                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Access</p>
-                  <p className="text-sm capitalize">{member.role}</p>
-                </div>
-                <div>
-                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Place</p>
-                  <p className="text-sm">{kindLabel(member.kind)}</p>
-                </div>
-                <div>
-                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Ownership</p>
-                  <p className="text-sm">{member.ownershipLabel}</p>
-                </div>
-              </div>
+              <p className="mt-1 text-sm">
+                <span className="text-muted-foreground">{kindLabel(member.kind)} · {ROLE_LABEL[member.role] ?? member.role} · </span>
+                <span className="font-medium">{member.ownershipLabel}</span>
+              </p>
             ) : (
-              <p className="text-xs capitalize text-muted-foreground">{kindLabel(member.kind)} · {member.role}</p>
+              <p className="mt-1 text-sm text-muted-foreground">{kindLabel(member.kind)} · {ROLE_LABEL[member.role] ?? member.role}</p>
             )}
           </div>
           {data.canDecide && member.role !== "owner" && member.ownershipKind !== "percent" && onAssignOwnership && (
-            <Button
-              type="button"
-              variant="ghost"
-              className="mt-2 h-11 px-0"
-              onClick={() => {
-                const intent = assignOwnershipIntent(member);
-                onAssignOwnership({ holder: intent.holder, linkUserId: intent.linkUserId });
-              }}
-            >
-              Assign ownership
-            </Button>
+            <PercentGrant
+              projectId={projectId}
+              holder={member.name}
+              userId={member.userId}
+              founderName={data.members.find((person) => person.role === "owner")?.name || "Owner"}
+              holders={data.holders ?? []}
+              onSaved={reload}
+            />
           )}
           {data.role === "owner" && member.role !== "owner" && (
             <select
               className="mt-3 h-11 w-full rounded-md bg-secondary px-3 text-base"
-              aria-label={`Place for ${member.name}`}
+              aria-label={`Who ${member.name} is`}
               value={member.kind}
               onChange={async (event) => {
                 await changeBusinessKind({ data: { projectId, memberId: member.id, kind: event.target.value } });
@@ -171,13 +245,14 @@ export function BusinessTeam({
             <div className="mt-3 flex gap-2">
               <select
                 className="h-11 flex-1 rounded-md bg-secondary px-3 text-base"
+                aria-label={`What ${member.name} can do`}
                 value={member.role}
                 onChange={async (event) => {
                   await changeBusinessRole({ data: { projectId, memberId: member.id, role: event.target.value } });
                   await reload();
                 }}
               >
-                {ROLES.map((item) => <option key={item} value={item}>{item}</option>)}
+                {ROLES.map((item) => <option key={item} value={item}>{ROLE_LABEL[item]}</option>)}
               </select>
               <Button type="button" variant="ghost" className="h-11 text-expense" onClick={async () => {
                 await removeBusinessMember({ data: { projectId, memberId: member.id } });
@@ -192,18 +267,8 @@ export function BusinessTeam({
         <article key={person.name} className="border-b border-border/60 py-3">
           <p className="truncate font-medium">{person.name}</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            {person.note ? `Joined. Paid ${person.note} from personal money.` : "Joined this project."}
+            {person.note ? `Joined. Paid ${person.note} from personal money.` : "Joined this project."} · Team member · No share
           </p>
-          <div className="mt-2 grid grid-cols-2 gap-3">
-            <div>
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Place</p>
-              <p className="text-sm">Team member</p>
-            </div>
-            <div>
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Ownership</p>
-              <p className="text-sm">No shares</p>
-            </div>
-          </div>
         </article>
       ))}
       {showInvites && pending.map((invite) => (

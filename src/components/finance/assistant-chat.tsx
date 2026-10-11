@@ -14,9 +14,9 @@ import { toast } from "sonner";
 
 const SUGGESTIONS = [
   "Add ₹250 coffee on UPI",
-  "Kitna spend hua this month?",
-  "Project pe kaun kitna owe karta hai?",
-  "Dinner ₹1,500 split equally",
+  "Family mein Dad ne ₹10,000 dale",
+  "Ghar ka ₹500 kirana mere account se",
+  "Kitna hai family total?",
 ];
 
 export function AssistantChat() {

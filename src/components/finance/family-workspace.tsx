@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeftRight, Banknote, BedDouble, Car, Folder, GraduationCap, HeartPulse, Receipt, ShoppingBag, Undo2, Utensils, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { EmptyState } from "@/components/finance/empty-state";
 import { formatMoney } from "@/lib/money";
 import { goalProgress } from "@/lib/family";
 import { toCents } from "@/lib/money";
@@ -16,32 +18,33 @@ import {
   moveToFamilyGoal,
   payFamilyBack,
   postFamilyEntry,
+  removeFamilyPerson,
   revokeFamilyInvite,
   saveFamilyBill,
   saveFamilyBudget,
   saveFamilyGoal,
   saveFamilyInvestment,
   saveFamilyLiability,
+  transferFamilyMoney,
 } from "@/lib/server/family";
-import { listAccounts } from "@/lib/server/accounts";
-import { todayISO } from "@/lib/utils";
+import { cn, formatShortDate, todayISO } from "@/lib/utils";
 
 type Section = "overview" | "activity" | "budget" | "goals" | "more";
+type DashAction = "in" | "out" | "move" | null;
 
-function line(kind: string, name: string | null, category: string | null, note: string | null, paidFrom?: string) {
-  const who = name || "Someone";
-  if (kind === "contribution") return `${who} added money`;
-  if (kind === "payback") return `Paid ${who} back`;
-  if (kind === "goal_move") return note || "Moved to a goal";
-  if (paidFrom === "family") return `Paid ${category || note || "a household expense"}`;
-  return `${who} paid ${category || note || "a household expense"}`;
-}
+const TABS: { id: Section; label: string }[] = [
+  { id: "overview", label: "Money" },
+  { id: "activity", label: "Activity" },
+  { id: "budget", label: "Budget" },
+  { id: "goals", label: "Goals" },
+  { id: "more", label: "More" },
+];
 
 export function FamilyWorkspace({ familyId, currency }: { familyId: string; currency: string }) {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["family", familyId], queryFn: () => getFamily({ data: { familyId } }) });
-  const accounts = useQuery({ queryKey: ["accounts"], queryFn: () => listAccounts() });
   const [section, setSection] = useState<Section>("overview");
+  const [action, setAction] = useState<DashAction>(null);
   const today = todayISO();
 
   useEffect(() => {
@@ -68,7 +71,7 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
   const invested = data.investments.reduce((sum, row) => sum + Number(row.current_value), 0);
   const owedOut = data.liabilities.reduce((sum, row) => sum + Number(row.balance), 0);
   const showWorth = data.investments.length > 0 || data.liabilities.length > 0;
-  const empty = data.accounts.length === 0 && data.entries.length === 0 && data.people.length <= 1;
+  const shared = data.accounts.filter((account) => !account.person_id);
 
   return (
     <div className="space-y-5 pt-4 md:max-w-xl">
@@ -77,71 +80,142 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
         <h1 className="font-display text-3xl tracking-tight">{data.family.name}</h1>
       </header>
       <div className="flex flex-wrap gap-2">
-        {(["overview", "activity", "budget", "goals", "more"] as const).map((item) => (
+        {TABS.map((item) => (
           <button
-            key={item}
+            key={item.id}
             type="button"
-            onClick={() => setSection(item)}
-            className={`h-10 rounded-full px-3 text-sm capitalize ${section === item ? "bg-foreground text-background" : "bg-secondary text-muted-foreground"}`}
+            onClick={() => setSection(item.id)}
+            className={`h-10 rounded-full px-3 text-sm ${section === item.id ? "bg-foreground text-background" : "bg-secondary text-muted-foreground"}`}
           >
-            {item}
+            {item.label}
           </button>
         ))}
       </div>
 
       {section === "overview" && (
-        <div className="space-y-4">
-          {empty && (
-            <div className="rounded-xl bg-card p-4">
-              <p className="font-medium">Let's set up your household money.</p>
-              <p className="mt-1 text-sm text-muted-foreground">Add a family account, a person, or a bill. You can skip all of it.</p>
-            </div>
-          )}
-          <p className="font-display text-4xl tabular">{formatMoney(cash.toFixed(2), currency)}</p>
-          <p className="text-sm text-muted-foreground">Family money. Personal accounts are not included.</p>
-          <div className="grid grid-cols-3 gap-2">
-            <Mini label="Added" value={formatMoney(added.toFixed(2), currency)} />
-            <Mini label="Spent" value={formatMoney(spent.toFixed(2), currency)} />
-            <Mini label="Saved" value={formatMoney(saved.toFixed(2), currency)} />
+        <div className="space-y-5">
+          <div>
+            <p className="font-display text-4xl tabular">{formatMoney(cash.toFixed(2), currency)}</p>
+            <p className="mt-1 text-sm text-muted-foreground">Family total. Everyone's accounts added together.</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              This month +{formatMoney(added.toFixed(2), currency)} in · −{formatMoney(spent.toFixed(2), currency)} out
+            </p>
           </div>
           {showWorth && (
             <p className="text-sm text-muted-foreground">
-              Family net worth {formatMoney((cash + saved + invested - owedOut).toFixed(2), currency)}. Investment values are typed in by you, not live prices.
+              Family net worth {formatMoney((cash + saved + invested - owedOut).toFixed(2), currency)}. Values you type, not live prices.
             </p>
           )}
-          {data.due.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-sm font-medium">Money to return</p>
-              {data.due.map((row) => (
-                <p key={row.person_id} className="text-sm text-muted-foreground">{row.display_name} · {formatMoney(row.open, currency)}</p>
-              ))}
+
+          {data.canRecord && (
+            <div className="grid grid-cols-2 gap-2">
+              <button type="button" onClick={() => setAction(action === "in" ? null : "in")} className={`h-12 rounded-2xl text-sm font-medium ${action === "in" ? "bg-foreground text-background" : "bg-card"}`}>
+                Money in
+              </button>
+              <button type="button" onClick={() => setAction(action === "out" ? null : "out")} className={`h-12 rounded-2xl text-sm font-medium ${action === "out" ? "bg-foreground text-background" : "bg-card"}`}>
+                Spent
+              </button>
             </div>
           )}
-          <ContributionForm familyId={familyId} people={data.people} accounts={data.accounts} today={today} can={data.canRecord} onSaved={reload} />
-          <ExpenseForm familyId={familyId} people={data.people} accounts={data.accounts} today={today} can={data.canRecord} onSaved={reload} />
-          <TransferForm
-            familyId={familyId}
-            accounts={data.accounts}
-            personal={(accounts.data ?? []).filter((account) => account.isActive)}
-            today={today}
-            can={data.canRecord}
-            onSaved={reload}
-          />
+          {data.canRecord && data.accounts.length > 1 && (
+            <button type="button" className="h-11 text-left text-sm text-muted-foreground" onClick={() => setAction(action === "move" ? null : "move")}>
+              {action === "move" ? "Close move" : "Move between us"}
+            </button>
+          )}
+          {(action === "in" || action === "out" || action === "move") && (
+            <MoneySheet
+              mode={action}
+              familyId={familyId}
+              wallets={data.accounts}
+              today={today}
+              onSaved={reload}
+              onClose={() => setAction(null)}
+            />
+          )}
+
+          <section className="space-y-1">
+            <p className="text-sm font-medium">Members</p>
+            {data.people.map((person) => {
+              const wallet = data.accounts.find((account) => account.person_id === person.id);
+              const canRemove = data.canPeople && person.id !== data.meId && person.role !== "owner";
+              return (
+                <div key={person.id} className="flex items-center gap-3 border-b border-border/60 py-3">
+                  <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-secondary text-sm font-medium">
+                    {(person.display_name.trim()[0] || "?").toUpperCase()}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{person.display_name}</p>
+                    {canRemove && (
+                      <button
+                        type="button"
+                        className="text-xs text-muted-foreground"
+                        onClick={() => {
+                          void removeFamilyPerson({ data: { familyId, personId: person.id } })
+                            .then(async () => {
+                              toast.success("Removed");
+                              await reload();
+                            })
+                            .catch((err: unknown) => toast.error(err instanceof Error ? err.message : "Couldn't remove"));
+                        }}
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                  <p className="tabular text-sm">{formatMoney(wallet?.balance ?? "0", currency)}</p>
+                </div>
+              );
+            })}
+            {shared.map((account) => (
+              <div key={account.id} className="flex items-center justify-between gap-3 border-b border-border/60 py-3">
+                <p className="text-sm">{account.name}</p>
+                <p className="tabular text-sm">{formatMoney(account.balance, currency)}</p>
+              </div>
+            ))}
+            {data.canPeople && (
+              <InviteByEmail familyId={familyId} invites={data.invites} onSaved={reload} />
+            )}
+          </section>
+
+          {data.due.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">To pay back</p>
+              {data.due.map((row) => (
+                <p key={row.person_id} className="text-sm">{row.display_name} · {formatMoney(row.open, currency)}</p>
+              ))}
+              <button type="button" className="h-11 text-sm text-muted-foreground" onClick={() => setSection("activity")}>Pay them back</button>
+            </div>
+          )}
+
+          <section className="space-y-3">
+            <h2 className="text-sm font-medium">Recent</h2>
+            {data.entries.length === 0 ? (
+              <EmptyState
+                icon={ArrowLeftRight}
+                title="No transactions yet"
+                body="Add money in, or what the house spent."
+                action={data.canRecord ? "Add an expense" : undefined}
+                onAction={data.canRecord ? () => setAction("out") : undefined}
+              />
+            ) : (
+              <div className="rounded-xl bg-card px-3 py-1 shadow-[var(--elev-shadow)]">
+                {data.entries.map((row) => (
+                  <FamilyTxn key={row.id} row={row} currency={currency} />
+                ))}
+              </div>
+            )}
+          </section>
         </div>
       )}
 
       {section === "activity" && (
         <div className="space-y-3">
-          {data.entries.length === 0 && <p className="text-sm text-muted-foreground">Nothing recorded yet.</p>}
-          {data.entries.map((row) => (
-            <div key={row.id} className="flex items-baseline justify-between gap-3 border-b border-border/60 py-3">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium">{line(row.kind, row.display_name, row.category, row.note, row.paid_from)}</p>
-                <p className="text-xs text-muted-foreground">{row.entry_date.slice(0, 10)}{row.paid_from === "personal" ? (row.reimburse ? " · to be paid back" : " · their contribution") : ""}</p>
-              </div>
-              <p className="tabular text-sm">{formatMoney(row.amount, currency)}</p>
-            </div>
-          ))}
+          <div className="rounded-xl bg-card px-3 py-1 shadow-[var(--elev-shadow)]">
+            {data.entries.length === 0 && <p className="px-1 py-6 text-center text-sm text-muted-foreground">Nothing recorded yet.</p>}
+            {data.entries.map((row) => (
+              <FamilyTxn key={row.id} row={row} currency={currency} />
+            ))}
+          </div>
           {data.canMoney && data.due.map((row) => (
             <Payback key={row.person_id} familyId={familyId} personId={row.person_id} name={row.display_name} accounts={data.accounts} today={today} onSaved={reload} />
           ))}
@@ -161,6 +235,164 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
   );
 }
 
+function familyIcon(row: { kind: string; category: string | null; note: string | null }): LucideIcon {
+  if (row.kind === "contribution") return Banknote;
+  if (row.kind === "transfer") return ArrowLeftRight;
+  if (row.kind === "payback") return Undo2;
+  if (row.kind === "goal_move") return Folder;
+  const text = `${row.category || ""} ${row.note || ""}`.toLowerCase();
+  if (/groc|food|kirana|restaurant|khana|milk/.test(text)) return Utensils;
+  if (/rent|house|home|maid/.test(text)) return BedDouble;
+  if (/fuel|petrol|uber|cab|auto|travel/.test(text)) return Car;
+  if (/medic|hospital|health|doctor/.test(text)) return HeartPulse;
+  if (/school|fee|book|tuition/.test(text)) return GraduationCap;
+  if (/shop|cloth|amazon|flipkart/.test(text)) return ShoppingBag;
+  return Receipt;
+}
+
+function familyTitle(row: {
+  kind: string;
+  display_name: string | null;
+  category: string | null;
+  note: string | null;
+  account_name?: string | null;
+  to_name?: string | null;
+}) {
+  if (row.kind === "transfer") return `${row.account_name || "Someone"} → ${row.to_name || "someone"}`;
+  if (row.kind === "contribution") return row.note || "Added money";
+  if (row.kind === "payback") return `Paid ${row.display_name || "someone"} back`;
+  if (row.kind === "goal_move") return row.note || "Moved to a goal";
+  return row.category || row.note || "Spent";
+}
+
+function FamilyTxn({
+  row,
+  currency,
+}: {
+  row: {
+    id: string;
+    kind: string;
+    display_name: string | null;
+    category: string | null;
+    note: string | null;
+    paid_from: string;
+    entry_date: string;
+    amount: string;
+    reimburse: boolean;
+    account_name?: string | null;
+    to_name?: string | null;
+  };
+  currency: string;
+}) {
+  const Icon = familyIcon(row);
+  const incoming = row.kind === "contribution";
+  const spent = row.kind === "expense" || row.kind === "payback";
+  const color = incoming ? "text-income" : spent ? "text-expense" : "text-foreground";
+  const prefix = incoming ? "+" : spent ? "−" : "";
+  const account = row.kind === "transfer" ? "" : row.account_name ? ` · ${row.account_name}` : "";
+  const extra = row.paid_from === "personal" && row.reimburse ? " · to be paid back" : "";
+  return (
+    <div className="flex w-full items-center gap-3 px-1 py-2.5">
+      <div className="grid size-10 shrink-0 place-items-center rounded-md bg-secondary text-muted-foreground">
+        <Icon className="size-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium">{familyTitle(row)}</p>
+        <p className="truncate text-xs text-muted-foreground">
+          {formatShortDate(row.entry_date.slice(0, 10))}
+          {account}
+          {extra}
+        </p>
+      </div>
+      <p className={cn("tabular shrink-0 text-sm font-medium", color)}>
+        {prefix}
+        {formatMoney(row.amount, currency, { sign: "never" })}
+      </p>
+    </div>
+  );
+}
+
+function MoneySheet({
+  mode,
+  familyId,
+  wallets,
+  today,
+  onSaved,
+  onClose,
+}: {
+  mode: "in" | "out" | "move";
+  familyId: string;
+  wallets: { id: string; name: string; balance: string }[];
+  today: string;
+  onSaved: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const [amount, setAmount] = useState("");
+  const [what, setWhat] = useState("");
+  const [fromId, setFromId] = useState(wallets[0]?.id ?? "");
+  const [toId, setToId] = useState(wallets.find((row) => row.id !== wallets[0]?.id)?.id ?? "");
+  const from = wallets.some((row) => row.id === fromId) ? fromId : (wallets[0]?.id ?? "");
+  const to = wallets.some((row) => row.id === toId) && toId !== from ? toId : (wallets.find((row) => row.id !== from)?.id ?? "");
+  if (wallets.length === 0) return <p className="text-sm text-muted-foreground">Add someone. Their account is created for you.</p>;
+  return (
+    <form className="grid gap-3 rounded-2xl bg-card p-4" onSubmit={async (event) => {
+      event.preventDefault();
+      try {
+        if (mode === "move") {
+          if (!to) throw new Error("Add another person first");
+          await transferFamilyMoney({ data: { familyId, fromAccountId: from, toAccountId: to, amount, date: today } });
+          toast.success("Moved");
+        } else {
+          await postFamilyEntry({
+            data: {
+              familyId,
+              kind: mode === "in" ? "contribution" : "expense",
+              amount,
+              date: today,
+              accountId: from,
+              category: mode === "out" ? what : undefined,
+              note: mode === "in" ? (what.trim() || undefined) : undefined,
+              paidFrom: "family",
+            },
+          });
+          toast.success(mode === "in" ? "Added" : "Saved");
+        }
+        await onSaved();
+        onClose();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Couldn't save");
+      }
+    }}>
+      <p className="text-sm font-medium">{mode === "in" ? "Into whose account?" : mode === "out" ? "From whose account?" : "From"}</p>
+      <div className="flex flex-wrap gap-2">
+        {wallets.map((wallet) => (
+          <button key={wallet.id} type="button" onClick={() => setFromId(wallet.id)} className={`h-10 max-w-full truncate rounded-full px-3 text-sm ${from === wallet.id ? "bg-foreground text-background" : "bg-secondary"}`}>
+            {wallet.name}
+          </button>
+        ))}
+      </div>
+      {mode === "move" && (
+        <>
+          <p className="text-sm font-medium">To</p>
+          <div className="flex flex-wrap gap-2">
+            {wallets.filter((wallet) => wallet.id !== from).map((wallet) => (
+              <button key={wallet.id} type="button" onClick={() => setToId(wallet.id)} className={`h-10 max-w-full truncate rounded-full px-3 text-sm ${to === wallet.id ? "bg-foreground text-background" : "bg-secondary"}`}>
+                {wallet.name}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+      <Input inputMode="decimal" placeholder="Amount" value={amount} onChange={(event) => setAmount(event.target.value)} aria-label="Amount" className="h-12 text-lg" />
+      {mode !== "move" && (
+        <Input placeholder={mode === "out" ? "Groceries, rent…" : "What for, optional"} value={what} onChange={(event) => setWhat(event.target.value)} aria-label="What for" />
+      )}
+      {mode === "move" && <p className="text-xs text-muted-foreground">Family total stays the same. This is not an expense.</p>}
+      <Button type="submit" className="h-12">{mode === "in" ? "Add money" : mode === "out" ? "Save expense" : "Move"}</Button>
+    </form>
+  );
+}
+
 function Mini({ label, value }: { label: string; value: string }) {
   return (
     <div>
@@ -170,35 +402,168 @@ function Mini({ label, value }: { label: string; value: string }) {
   );
 }
 
-function ContributionForm({ familyId, people, accounts, today, can, onSaved }: {
+function roleWord(role: string) {
+  if (role === "owner") return "Owner";
+  if (role === "adult") return "Adult";
+  if (role === "viewer") return "Can only look";
+  return "Member";
+}
+
+function ActionButton({ label, open, onClick }: { label: string; open: boolean; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className={`h-11 rounded-xl px-3 text-left text-sm ${open ? "bg-foreground text-background" : "bg-card"}`}>
+      {label}
+    </button>
+  );
+}
+
+function InviteByEmail({
+  familyId,
+  invites,
+  onSaved,
+}: {
+  familyId: string;
+  invites: { id: string; email: string | null; state: string }[];
+  onSaved: () => Promise<void>;
+}) {
+  const [email, setEmail] = useState("");
+  const [link, setLink] = useState("");
+  const open = invites.filter((invite) => invite.state === "open");
+  return (
+    <div className="space-y-2 pt-2">
+      <form className="flex gap-2" onSubmit={async (event) => {
+        event.preventDefault();
+        try {
+          const saved = await inviteFamilyMember({
+            data: { familyId, email, origin: window.location.origin, role: "adult" },
+          });
+          setEmail("");
+          if (saved?.emailed) {
+            setLink("");
+            toast.success(`Invite emailed to ${saved.email}`);
+          } else {
+            const url = saved?.url || `${window.location.origin}${saved?.path ?? ""}`;
+            setLink(url);
+            toast.error("Invite saved, but the email did not send. Share the link.");
+          }
+          await onSaved();
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : "Couldn't invite");
+        }
+      }}>
+        <Input type="email" placeholder="Their email" value={email} onChange={(event) => setEmail(event.target.value)} aria-label="Invite email" />
+        <Button type="submit" className="h-11 shrink-0">Invite</Button>
+      </form>
+      {link && <p className="break-all text-xs text-muted-foreground">{link}</p>}
+      {open.map((invite) => (
+        <div key={invite.id} className="flex items-center justify-between gap-3 text-sm">
+          <span className="min-w-0 truncate text-muted-foreground">{invite.email || "Invite"} · waiting</span>
+          <button type="button" className="text-expense" onClick={() => void revokeFamilyInvite({ data: { familyId, inviteId: invite.id } }).then(onSaved)}>Revoke</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function QuickPerson({ familyId, startOpen, onSaved }: { familyId: string; startOpen: boolean; onSaved: () => Promise<void> }) {
+  const [open, setOpen] = useState(startOpen);
+  const [name, setName] = useState("");
+  if (!open) {
+    return <button type="button" className="h-11 text-left text-sm text-muted-foreground" onClick={() => setOpen(true)}>+ Add someone</button>;
+  }
+  return (
+    <form className="flex gap-2 pt-2" onSubmit={async (event) => {
+      event.preventDefault();
+      try {
+        await addFamilyPerson({ data: { familyId, name, role: "adult" } });
+        setName("");
+        setOpen(false);
+        toast.success("Added. Their account is ready.");
+        await onSaved();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Couldn't add");
+      }
+    }}>
+      <Input placeholder="Dad, Mom, or anyone" value={name} onChange={(event) => setName(event.target.value)} aria-label="Person name" />
+      <Button type="submit" className="h-11 shrink-0">Add</Button>
+    </form>
+  );
+}
+
+function QuickAccount({ familyId, startOpen, onSaved }: { familyId: string; startOpen: boolean; onSaved: () => Promise<void> }) {
+  const [open, setOpen] = useState(startOpen);
+  const [name, setName] = useState("");
+  const [opening, setOpening] = useState("");
+  if (!open) {
+    return <button type="button" className="h-11 text-left text-sm text-muted-foreground" onClick={() => setOpen(true)}>Add an account</button>;
+  }
+  return (
+    <form className="grid gap-2" onSubmit={async (event) => {
+      event.preventDefault();
+      try {
+        await addFamilyAccount({ data: { familyId, name, balance: opening || "0" } });
+        setName("");
+        setOpening("");
+        toast.success("Account added");
+        await onSaved();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Couldn't add");
+      }
+    }}>
+      <Input placeholder="Family cash" value={name} onChange={(event) => setName(event.target.value)} aria-label="Account name" />
+      <Input inputMode="decimal" placeholder="Already in it, optional" value={opening} onChange={(event) => setOpening(event.target.value)} aria-label="Starting amount" />
+      <Button type="submit" className="h-11">Add account</Button>
+    </form>
+  );
+}
+
+async function personForEntry(familyId: string, personId: string, newName: string, canPeople: boolean) {
+  if (personId !== "__new__") return personId || undefined;
+  if (!canPeople) throw new Error("Ask the owner to add that person");
+  const created = await addFamilyPerson({ data: { familyId, name: newName, role: "adult" } });
+  if (!created?.id) throw new Error("Couldn't add that person");
+  return created.id;
+}
+
+function ContributionForm({ familyId, people, accounts, today, can, canPeople, onSaved }: {
   familyId: string;
   people: { id: string; display_name: string }[];
   accounts: { id: string; name: string }[];
   today: string;
   can: boolean;
+  canPeople: boolean;
   onSaved: () => Promise<void>;
 }) {
   const [amount, setAmount] = useState("");
   const [personId, setPersonId] = useState(people[0]?.id ?? "");
+  const [newName, setNewName] = useState("");
   const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
+  const chosen = personId === "__new__" || people.some((person) => person.id === personId) ? personId : (people[0]?.id ?? "");
   if (!can) return null;
   return (
     <form className="grid gap-2 rounded-xl bg-card p-4" onSubmit={async (event) => {
       event.preventDefault();
       try {
-        await postFamilyEntry({ data: { familyId, kind: "contribution", amount, date: today, personId, accountId: accountId || undefined } });
+        const id = await personForEntry(familyId, chosen, newName, canPeople);
+        await postFamilyEntry({ data: { familyId, kind: "contribution", amount, date: today, personId: id, accountId: accountId || undefined } });
         setAmount("");
+        setNewName("");
+        setPersonId(id || "");
         toast.success("Added to the family");
         await onSaved();
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Couldn't save");
       }
     }}>
-      <p className="text-sm font-medium">Money added</p>
-      <Input inputMode="decimal" placeholder="Amount" value={amount} onChange={(event) => setAmount(event.target.value)} />
-      <select className="h-11 rounded-md bg-secondary px-3 text-base" value={personId} onChange={(event) => setPersonId(event.target.value)} aria-label="From">
+      <p className="text-sm font-medium">Who added money</p>
+      <Input inputMode="decimal" placeholder="Amount" value={amount} onChange={(event) => setAmount(event.target.value)} aria-label="Amount added" />
+      <select className="h-11 rounded-md bg-secondary px-3 text-base" value={chosen} onChange={(event) => setPersonId(event.target.value)} aria-label="From">
         {people.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}
+        {canPeople && <option value="__new__">Add someone new</option>}
       </select>
+      {chosen === "__new__" && (
+        <Input placeholder="Their name" value={newName} onChange={(event) => setNewName(event.target.value)} aria-label="New person" />
+      )}
       <select className="h-11 rounded-md bg-secondary px-3 text-base" value={accountId} onChange={(event) => setAccountId(event.target.value)} aria-label="Into">
         <option value="">Not in a family account yet</option>
         {accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
@@ -208,52 +573,64 @@ function ContributionForm({ familyId, people, accounts, today, can, onSaved }: {
   );
 }
 
-function ExpenseForm({ familyId, people, accounts, today, can, onSaved }: {
+function ExpenseForm({ familyId, people, accounts, today, can, canPeople, onSaved }: {
   familyId: string;
   people: { id: string; display_name: string }[];
   accounts: { id: string; name: string }[];
   today: string;
   can: boolean;
+  canPeople: boolean;
   onSaved: () => Promise<void>;
 }) {
   const [amount, setAmount] = useState("");
-  const [category, setCategory] = useState("Groceries");
+  const [category, setCategory] = useState("");
   const [personId, setPersonId] = useState(people[0]?.id ?? "");
-  const [paidFrom, setPaidFrom] = useState<"family" | "personal">("family");
+  const [newName, setNewName] = useState("");
+  const [paidFrom, setPaidFrom] = useState<"family" | "personal">(accounts.length ? "family" : "personal");
   const [reimburse, setReimburse] = useState(false);
   const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
+  const chosen = personId === "__new__" || people.some((person) => person.id === personId) ? personId : (people[0]?.id ?? "");
+  const account = accounts.some((row) => row.id === accountId) ? accountId : (accounts[0]?.id ?? "");
   if (!can) return null;
   return (
     <form className="grid gap-2 rounded-xl bg-card p-4" onSubmit={async (event) => {
       event.preventDefault();
       try {
+        if (paidFrom === "family" && !account) throw new Error("Add a shared account above first");
+        const id = await personForEntry(familyId, chosen, newName, canPeople);
         await postFamilyEntry({
-          data: { familyId, kind: "expense", amount, date: today, category, personId, paidFrom, reimburse: paidFrom === "personal" && reimburse, accountId: paidFrom === "family" ? accountId : undefined },
+          data: { familyId, kind: "expense", amount, date: today, category, personId: id, paidFrom, reimburse: paidFrom === "personal" && reimburse, accountId: paidFrom === "family" ? account : undefined },
         });
         setAmount("");
+        setNewName("");
+        setPersonId(id || "");
         toast.success("Expense saved");
         await onSaved();
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Couldn't save");
       }
     }}>
-      <p className="text-sm font-medium">Household expense</p>
-      <Input inputMode="decimal" placeholder="Amount" value={amount} onChange={(event) => setAmount(event.target.value)} />
-      <Input placeholder="What for" value={category} onChange={(event) => setCategory(event.target.value)} />
-      <select className="h-11 rounded-md bg-secondary px-3 text-base" value={personId} onChange={(event) => setPersonId(event.target.value)} aria-label="Who">
+      <p className="text-sm font-medium">What the house spent</p>
+      <Input inputMode="decimal" placeholder="Amount" value={amount} onChange={(event) => setAmount(event.target.value)} aria-label="Expense amount" />
+      <Input placeholder="Groceries, rent, electricity" value={category} onChange={(event) => setCategory(event.target.value)} aria-label="What for" />
+      <select className="h-11 rounded-md bg-secondary px-3 text-base" value={chosen} onChange={(event) => setPersonId(event.target.value)} aria-label="Who">
         {people.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}
+        {canPeople && <option value="__new__">Add someone new</option>}
       </select>
+      {chosen === "__new__" && (
+        <Input placeholder="Their name" value={newName} onChange={(event) => setNewName(event.target.value)} aria-label="New person" />
+      )}
       <select className="h-11 rounded-md bg-secondary px-3 text-base" value={paidFrom} onChange={(event) => setPaidFrom(event.target.value as "family" | "personal")} aria-label="Paid from">
-        <option value="family">Paid from family money</option>
-        <option value="personal">Paid personally</option>
+        <option value="family">From family money</option>
+        <option value="personal">They paid it themselves</option>
       </select>
       {paidFrom === "family" && accounts.length > 0 && (
-        <select className="h-11 rounded-md bg-secondary px-3 text-base" value={accountId} onChange={(event) => setAccountId(event.target.value)} aria-label="Family account">
-          {accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+        <select className="h-11 rounded-md bg-secondary px-3 text-base" value={account} onChange={(event) => setAccountId(event.target.value)} aria-label="Family account">
+          {accounts.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}
         </select>
       )}
       {paidFrom === "family" && accounts.length === 0 && (
-        <p className="text-sm text-muted-foreground">Add a family account in More before paying from family money.</p>
+        <p className="text-sm text-muted-foreground">Add a shared account above before paying from family money.</p>
       )}
       {paidFrom === "personal" && (
         <label className="flex items-center gap-2 text-sm">
@@ -261,7 +638,7 @@ function ExpenseForm({ familyId, people, accounts, today, can, onSaved }: {
           Family should pay this person back
         </label>
       )}
-      <Button type="submit" className="h-11">Save expense</Button>
+      <Button type="submit" className="h-11">Save</Button>
     </form>
   );
 }
@@ -344,6 +721,7 @@ function BudgetPanel({ familyId, budgets, entries, currency, can, month, onSaved
   const [amount, setAmount] = useState("");
   return (
     <div className="space-y-3">
+      {budgets.length === 0 && <p className="text-sm text-muted-foreground">No limit yet. Groceries or electricity is a good start.</p>}
       {budgets.map((budget) => {
         const used = entries
           .filter((row) => row.kind === "expense" && row.entry_date.slice(0, 7) === month && (row.category || "").toLowerCase() === budget.category.toLowerCase())
@@ -397,6 +775,7 @@ function GoalsPanel({ familyId, goals, accounts, currency, today, can, onSaved }
   const selectedAccount = accounts.some((account) => account.id === accountId) ? accountId : (accounts[0]?.id ?? "");
   return (
     <div className="space-y-3">
+      {goals.length === 0 && <p className="text-sm text-muted-foreground">No goal yet. An emergency fund or a wedding both fit.</p>}
       {goals.map((goal) => {
         const pct = goalProgress(toCents(goal.saved), toCents(goal.target));
         return (
@@ -457,10 +836,6 @@ function MorePanel({ familyId, data, currency, today, onSaved }: {
   today: string;
   onSaved: () => Promise<void>;
 }) {
-  const [person, setPerson] = useState("");
-  const [role, setRole] = useState("adult");
-  const [inviteRole, setInviteRole] = useState("adult");
-  const [link, setLink] = useState("");
   const [accountName, setAccountName] = useState("");
   const [opening, setOpening] = useState("");
   const [bill, setBill] = useState("");
@@ -476,59 +851,12 @@ function MorePanel({ familyId, data, currency, today, onSaved }: {
       <section className="space-y-2">
         <p className="text-sm font-medium">People</p>
         {data.people.map((personRow) => (
-          <p key={personRow.id} className="text-sm">{personRow.display_name} · <span className="capitalize text-muted-foreground">{personRow.role}</span>{personRow.linked_user_id ? "" : " · no Kharcha login"}</p>
-        ))}
-        {data.canPeople && (
-          <form className="grid gap-2" onSubmit={async (event) => {
-            event.preventDefault();
-            try {
-              await addFamilyPerson({ data: { familyId, name: person, role } });
-              setPerson("");
-              await onSaved();
-            } catch (err) {
-              toast.error(err instanceof Error ? err.message : "Couldn't add");
-            }
-          }}>
-            <Input placeholder="Dad" value={person} onChange={(event) => setPerson(event.target.value)} />
-            <select className="h-11 rounded-md bg-secondary px-3 text-base" value={role} onChange={(event) => setRole(event.target.value)}>
-              <option value="adult">Adult</option>
-              <option value="member">Member</option>
-              <option value="viewer">Viewer</option>
-            </select>
-            <Button type="submit" className="h-11">Add person</Button>
-          </form>
-        )}
-        {data.canPeople && (
-          <form className="grid gap-2" onSubmit={async (event) => {
-            event.preventDefault();
-            try {
-              const saved = await inviteFamilyMember({ data: { familyId, role: inviteRole } });
-              const url = `${window.location.origin}${saved?.path ?? ""}`;
-              setLink(url);
-              toast.success("Invite ready");
-              await onSaved();
-            } catch (err) {
-              toast.error(err instanceof Error ? err.message : "Couldn't invite");
-            }
-          }}>
-            <select className="h-11 rounded-md bg-secondary px-3 text-base" value={inviteRole} onChange={(event) => setInviteRole(event.target.value)} aria-label="Invite role">
-              <option value="adult">Adult</option>
-              <option value="member">Member</option>
-              <option value="viewer">Viewer</option>
-            </select>
-            <Button type="submit" variant="secondary" className="h-11">Invite</Button>
-            {link && <p className="break-all text-xs text-muted-foreground">{link}</p>}
-          </form>
-        )}
-        {data.invites.filter((invite) => invite.state === "open").map((invite) => (
-          <div key={invite.id} className="flex items-center justify-between text-sm">
-            <span className="capitalize text-muted-foreground">{invite.role} invite</span>
-            {data.canPeople && <button type="button" className="text-expense" onClick={() => void revokeFamilyInvite({ data: { familyId, inviteId: invite.id } }).then(onSaved)}>Revoke</button>}
-          </div>
+          <p key={personRow.id} className="text-sm">{personRow.display_name} · <span className="capitalize text-muted-foreground">{personRow.role}</span></p>
         ))}
       </section>
       <section className="space-y-2">
-        <p className="text-sm font-medium">Family accounts</p>
+        <p className="text-sm font-medium">Extra accounts</p>
+        <p className="text-sm text-muted-foreground">Each person already has an account, counted in the family total. Add one only for a shared pot.</p>
         {data.accounts.map((account) => (
           <p key={account.id} className="text-sm">{account.name} · {formatMoney(account.balance, currency)}</p>
         ))}

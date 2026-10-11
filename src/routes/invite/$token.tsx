@@ -9,7 +9,7 @@ import { APP_NAME } from "@/lib/constants";
 import { rememberReturn } from "@/lib/return-to";
 import { endOfMonthISO, startOfMonthISO } from "@/lib/utils";
 import { toast } from "sonner";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export const Route = createFileRoute("/invite/$token")({ component: InvitePage });
 
@@ -18,6 +18,8 @@ function InvitePage() {
   const { user, isPending } = useCurrentUserState();
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
+  const [joinError, setJoinError] = useState("");
+  const started = useRef(false);
   const q = useQuery({
     queryKey: ["invite", token, user?.id],
     enabled: Boolean(user),
@@ -32,6 +34,31 @@ function InvitePage() {
       getBootstrap({ data: { from, to, displayName: user?.displayName ?? user?.primaryEmail ?? null } }),
   });
   const returnPath = `/invite/${token}`;
+  const invite = q.data;
+  const needsSetup = Boolean(ready.data && (!ready.data.profile.onboardingCompleted || ready.data.accounts.length === 0));
+  const familyReady = Boolean(
+    user && ready.data && !needsSetup && invite && invite.kind === "family" && (invite.state === "open" || invite.state === "member") && !joinError,
+  );
+
+  useEffect(() => {
+    if (!familyReady || !invite || started.current) return;
+    started.current = true;
+    if (invite.state === "member") {
+      void navigate({ to: "/family/$familyId", params: { familyId: invite.projectId } });
+      return;
+    }
+    setBusy(true);
+    void acceptInvite({ data: { token } })
+      .then((res) => {
+        toast.success("Joined");
+        void navigate({ to: "/family/$familyId", params: { familyId: res?.projectId ?? invite.projectId } });
+      })
+      .catch((err: unknown) => {
+        started.current = false;
+        setBusy(false);
+        setJoinError(err instanceof Error ? err.message : "Couldn't join");
+      });
+  }, [familyReady, invite, navigate, token]);
 
   if (isPending) return <BrandLoader />;
   if (!user) {
@@ -40,7 +67,7 @@ function InvitePage() {
       <main className="grid min-h-dvh place-items-center px-6 text-center">
         <div className="max-w-sm space-y-4">
           <p className="font-display text-3xl">{APP_NAME}</p>
-          <p className="text-sm text-muted-foreground">Sign in or create an account to see this project invite.</p>
+          <p className="text-sm text-muted-foreground">Sign in or create an account. If you're new, a short setup comes first, then you join.</p>
           <Button className="h-11 w-full" onClick={() => { window.location.href = `/login?next=${encodeURIComponent(returnPath)}`; }}>
             Continue
           </Button>
@@ -49,18 +76,18 @@ function InvitePage() {
     );
   }
   if (ready.isPending || q.isPending) return <BrandLoader label="Opening invite…" />;
-  if (ready.data && (!ready.data.profile.onboardingCompleted || ready.data.accounts.length === 0)) {
+  if (needsSetup) {
     rememberReturn(returnPath);
     return <Navigate to="/onboarding" />;
   }
-  if (q.error || !q.data) {
+  if (q.error || !invite) {
     return (
       <main className="grid min-h-dvh place-items-center px-6 text-center">
         <p className="text-sm text-expense">{q.error instanceof Error ? q.error.message : "Invite unavailable"}</p>
       </main>
     );
   }
-  const invite = q.data;
+  if (familyReady || busy) return <BrandLoader label="Joining your family…" />;
 
   return (
     <main className="grid min-h-dvh place-items-center px-6">
@@ -112,6 +139,7 @@ function InvitePage() {
             {invite.kind === "family" ? "Open family" : "Open project"}
           </Button>
         )}
+        {joinError && <p className="text-sm text-expense">{joinError}</p>}
         {invite.state !== "open" && invite.state !== "member" && (
           <p className="text-sm text-muted-foreground">
             {invite.state === "expired" ? "This invite has expired." : invite.state === "revoked" ? "This invite was revoked." : "This invite was already used."}

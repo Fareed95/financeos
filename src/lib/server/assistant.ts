@@ -18,6 +18,7 @@ import type { Sql } from "@/lib/db";
 import type { AccountType, BudgetPeriod, ProjectStatus, ProjectType, TxnType } from "@/lib/types";
 import { defaultUsefulYears } from "@/lib/server/commitments";
 import { importProjectActivity } from "@/lib/server/business";
+import { createFamilyEmailInvite, listFamilyBooks, recordFamilyForAssistant } from "@/lib/server/family";
 import type { SplitMethod } from "@/lib/split";
 
 export type AssistantAction = { tool: string; summary: string; ok: boolean };
@@ -495,6 +496,56 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "get_family",
+      description: "Family household money. Separate from personal salary and personal accounts. Members, each person's balance, and the family total.",
+      parameters: {
+        type: "object",
+        properties: { family: { type: "string", description: "Family name. Omit if they have only one." } },
+        required: [],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "record_family_money",
+      description: "Add money into a family member's account, spend from their account, or move money between two family members. A move does not change the family total and is not an expense. Do not use add_transaction for this.",
+      parameters: {
+        type: "object",
+        properties: {
+          family: { type: "string", description: "Family name. Omit if they have only one." },
+          kind: { type: "string", enum: ["in", "out", "move"] },
+          amount: { type: "string" },
+          person: { type: "string", description: "Whose account. me, or their name. For a move, this is who the money leaves." },
+          to: { type: "string", description: "For a move, who receives the money." },
+          what: { type: "string", description: "Short English title. Translate Hindi. Groceries, rent, salary." },
+          date: { type: "string", description: "YYYY-MM-DD. Default today IST." },
+        },
+        required: ["kind", "amount"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "invite_family_member",
+      description: "Email an invite to join the family. They sign in, finish setup if new, and join with the name on their account. Never invent a member without an email.",
+      parameters: {
+        type: "object",
+        properties: {
+          family: { type: "string", description: "Family name. Omit if they have only one." },
+          email: { type: "string" },
+        },
+        required: ["email"],
+        additionalProperties: false,
+      },
+    },
+  },
 ] as const;
 
 async function resolveByName(
@@ -746,6 +797,7 @@ async function loadOverview(sql: Sql, userId: string) {
     monthlyOut,
     owned,
     businessActivity,
+    families: await listFamilyBooks(sql, userId),
   };
 }
 
@@ -1588,6 +1640,48 @@ async function runTool(
     return { result: { amount, date: today }, summary: `${bill.name} ₹${amount} deducted`, mutated: true };
   }
 
+  if (name === "get_family" || name === "record_family_money" || name === "invite_family_member") {
+    if (name === "get_family") {
+      const books = await listFamilyBooks(sql, userId);
+      const wanted = str("family").toLowerCase();
+      const hit = wanted
+        ? books.filter((book) => book.name.toLowerCase() === wanted || book.name.toLowerCase().includes(wanted))
+        : books;
+      return { result: hit.length === books.length ? books : hit, summary: "Looked up the family", mutated: false };
+    }
+    if (name === "invite_family_member") {
+      const books = await listFamilyBooks(sql, userId);
+      const wanted = str("family").toLowerCase();
+      const hit = wanted
+        ? books.find((book) => book.name.toLowerCase() === wanted || book.name.toLowerCase().includes(wanted))
+        : books.length === 1 ? books[0] : undefined;
+      if (!hit) throw new Error(books.length ? "Which family?" : "You are not in a family yet");
+      const invite = await createFamilyEmailInvite(sql, userId, { familyId: hit.id, email: str("email"), origin, role: "adult" });
+      return {
+        result: invite,
+        summary: invite.emailed ? `Emailed ${invite.email}` : `Invite ready for ${invite.email}, email did not send`,
+        mutated: true,
+      };
+    }
+    const kind = str("kind");
+    if (kind !== "in" && kind !== "out" && kind !== "move") throw new Error("Say if money came in, was spent, or moved");
+    const saved = await recordFamilyForAssistant(sql, userId, {
+      family: str("family"),
+      kind,
+      amount: str("amount"),
+      person: str("person"),
+      to: str("to"),
+      what: str("what"),
+      date: str("date") || todayIST(),
+    });
+    const summary = saved.kind === "move"
+      ? `Moved ₹${saved.amount} from ${saved.from} to ${saved.to}`
+      : saved.kind === "in"
+        ? `Added ₹${saved.amount} to ${saved.person}`
+        : `Spent ₹${saved.amount} from ${saved.person}`;
+    return { result: saved, summary, mutated: true };
+  }
+
   throw new Error(`Unknown tool ${name}`);
 }
 
@@ -1605,7 +1699,7 @@ Examples:
   "aaj 250 coffee UPI pe" → description "Coffee".
   "5k HDFC se UPI" → transfer, no Hinglish description.
 
-You can actually change their books with tools. When they ask to add/log/record spend, income, transfers, accounts, trips, budgets, splits, invites, settlements, salary, EMI, subscriptions, bills, or things they own — call the tool. Don't describe how to click the UI.
+You can actually change their books with tools. When they ask to add/log/record spend, income, transfers, accounts, trips, budgets, splits, invites, settlements, salary, EMI, subscriptions, bills, family money, or things they own — call the tool. Don't describe how to click the UI.
 On a personal project, remaining = budget − expenses + income tagged to that project. Never raise the budget because someone paid them back.
 On a collaborative project, remaining and spent in the snapshot are YOUR spend (personal expenses plus your share), not the whole group. you > 0 means you are owed. you < 0 means you owe.
 
@@ -1625,6 +1719,13 @@ SPLITTING
 - Participants must already be members, matched from the snapshot. If the other person is not a member, invite_to_project and give them the url. Do not invent people. Do not split with only yourself.
 - get_split answers who pays whom. When they ask to settle, call settle_project in the same turn. If they name more than the debt, omit amount so only the owed payment is recorded, then say you recorded that and not the extra. Never only promise to settle. Private debts are not cleared by settle_project.
 - After a split or settlement, trust the tool result. Do not invent a different share.
+
+FAMILY
+- If they say family, ghar, household, or name someone who is in families in the snapshot, that money is family money. Call record_family_money or get_family. Never add_transaction for it, and never touch their personal salary or personal UPI for it.
+- The family total is the sum of each member's account. kind "in" adds to that person's account. kind "out" spends from their account. kind "move" shifts money between two members, does not change the total, and is not an expense.
+- Examples: "family mein 500 kirana mere account se" → kind out, person me, what Groceries. "dad ne 10k dale" → kind in, person Dad. "2k mere se mom ko" → kind move, person me, to Mom.
+- People join only by email. invite_family_member sends the mail. Do not invent a member. After they accept, their name is the name on their Kharcha account.
+- If the email did not send, give them the url from the tool. Do not pretend the mail went out.
 If an account/category/project is unambiguous from the snapshot (e.g. only one UPI), use it. If two could match, ask one short question instead of guessing.
 For deletes, only act when they clearly asked.
 Dates without a year are this year. "Aaj" / "today" = ${overview.today}. "Kal" is tomorrow unless they mean yesterday from context.

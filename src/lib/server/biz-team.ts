@@ -5,6 +5,7 @@ import type { Sql } from "@/lib/db";
 import { accessGrantFromInvite, buildOwnershipView, ownershipDecisionWrite } from "@/lib/ownership-decision";
 import { holdersOf, loadOwnershipPeople, requireBusiness } from "@/lib/server/business";
 import { ownership } from "@/lib/cap-table";
+import { formatOwnershipPercent } from "@/lib/ownership-decision";
 import { ensureUser } from "@/lib/server/ensure";
 import { publicError } from "@/lib/utils";
 
@@ -90,6 +91,13 @@ export async function listTeam(sql: Sql, userId: string, projectId: string) {
       }))
       .filter((invite) => invite.state !== "used"),
     roleCopy: ROLE_COPY,
+    holders: canViewEquity
+      ? holders.map((holder) => ({
+          name: holder.name,
+          shares: holder.shares.toString(),
+          percent: formatOwnershipPercent(holder.bps),
+        }))
+      : [],
   };
 }
 

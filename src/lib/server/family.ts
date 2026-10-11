@@ -13,6 +13,7 @@ import {
   familyInviteView,
   type FamilyPermission,
 } from "@/lib/family-access";
+import { APP_NAME } from "@/lib/constants";
 
 async function hashToken(token: string) {
   const { createHash } = await import("node:crypto");
@@ -40,6 +41,71 @@ function money(value: string | number) {
   const parsed = parseMoney(String(value || "0"));
   if (Number(parsed) <= 0) throw new Error("Enter an amount");
   return parsed;
+}
+
+function cleanEmail(raw: string) {
+  const email = raw.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Enter a real email");
+  return email;
+}
+
+function safeOrigin(input: string | undefined | null) {
+  if (!input) return "";
+  try {
+    const url = new URL(input);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return "";
+    return url.origin;
+  } catch {
+    return "";
+  }
+}
+
+async function accountName(sql: Sql, userId: string) {
+  const rows = await sql<{ full_name: string | null; name: string | null }>`
+    select p.full_name, u.name
+    from profiles p
+    left join "user" u on u.id = p.id
+    where p.id = ${userId}
+  `;
+  const name = (rows[0]?.full_name || rows[0]?.name || "").replace(/\s+/g, " ").trim();
+  return name || "Family member";
+}
+
+async function sendFamilyInviteMail(to: string, fromName: string, familyName: string, url: string) {
+  const key = process.env.RESEND_API_KEY;
+  if (!key || !url.startsWith("http")) return false;
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        from: process.env.MAIL_FROM || `${APP_NAME} <onboarding@resend.dev>`,
+        to: [to],
+        subject: `${fromName} invited you to ${APP_NAME}`,
+        text: `${fromName} invited you to their family "${familyName}" on ${APP_NAME}.\n\nOpen the link to join. If you're new, sign in and finish setup first. The family will show the name on your account.\n\n${url}\n`,
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureMemberWallets(sql: Sql, familyId: string) {
+  const people = await sql<{ id: string; display_name: string }>`
+    select id, display_name from family_people where family_id = ${familyId} and status = 'active'
+  `;
+  const wallets = await sql<{ person_id: string }>`
+    select person_id from family_accounts where family_id = ${familyId} and person_id is not null
+  `;
+  const have = new Set(wallets.map((row) => row.person_id));
+  for (const person of people) {
+    if (have.has(person.id)) continue;
+    await sql`
+      insert into family_accounts (id, family_id, name, kind, balance, person_id)
+      values (${crypto.randomUUID()}, ${familyId}, ${person.display_name}, 'cash', 0, ${person.id})
+    `;
+  }
 }
 
 export const listFamilies = createServerFn({ method: "POST" })
@@ -75,6 +141,7 @@ export const createFamily = createServerFn({ method: "POST" })
         insert into family_people (id, family_id, display_name, linked_user_id, role, status)
         values (${crypto.randomUUID()}, ${id}, ${profile[0]?.full_name || "You"}, ${context.userId}, 'owner', 'active')
       `;
+      await ensureMemberWallets(sql, id);
       return { id };
     } catch (err) {
       publicError(err, "Couldn't create that family.");
@@ -88,22 +155,32 @@ export const getFamily = createServerFn({ method: "POST" })
     try {
       const { sql } = await ensureUser(context.userId);
       const me = await requireFamily(sql, context.userId, data.familyId, "view");
+      await ensureMemberWallets(sql, data.familyId);
       const family = await sql<{ id: string; name: string }>`select id, name from families where id = ${data.familyId}`;
       const people = await sql<{ id: string; display_name: string; role: string; linked_user_id: string | null }>`
         select id, display_name, role, linked_user_id from family_people
         where family_id = ${data.familyId} and status = 'active' order by created_at
       `;
-      const accounts = await sql<{ id: string; name: string; kind: string; balance: string }>`
-        select id, name, kind, balance::text as balance from family_accounts where family_id = ${data.familyId} order by created_at
+      const accounts = await sql<{ id: string; name: string; kind: string; balance: string; person_id: string | null }>`
+        select a.id, a.name, a.kind, a.balance::text as balance, a.person_id
+        from family_accounts a
+        left join family_people p on p.id = a.person_id
+        where a.family_id = ${data.familyId}
+          and (a.person_id is null or p.status = 'active')
+        order by a.created_at
       `;
       const entries = await sql<{
         id: string; kind: string; amount: string; entry_date: string; category: string | null;
         person_id: string | null; paid_from: string; reimburse: boolean; note: string | null; display_name: string | null;
+        account_name: string | null; to_name: string | null;
       }>`
         select e.id, e.kind, e.amount::text as amount, e.entry_date::text as entry_date, e.category,
-               e.person_id, e.paid_from, e.reimburse, e.note, p.display_name
+               e.person_id, e.paid_from, e.reimburse, e.note, p.display_name,
+               a.name as account_name, t.name as to_name
         from family_entries e
         left join family_people p on p.id = e.person_id
+        left join family_accounts a on a.id = e.account_id
+        left join family_accounts t on t.id = e.to_account_id
         where e.family_id = ${data.familyId}
         order by e.entry_date desc, e.created_at desc
         limit 80
@@ -140,6 +217,7 @@ export const getFamily = createServerFn({ method: "POST" })
         : [];
       return {
         family: family[0],
+        meId: me.id,
         role: me.role,
         canRecord: canFamily(me.role, "record"),
         canMoney: canFamily(me.role, "manage_money"),
@@ -178,33 +256,99 @@ export const addFamilyPerson = createServerFn({ method: "POST" })
       const name = data.name.trim();
       if (!name) throw new Error("Give them a name");
       const role = data.role === "adult" || data.role === "viewer" ? data.role : "member";
+      const id = crypto.randomUUID();
       await sql`
         insert into family_people (id, family_id, display_name, role, status)
-        values (${crypto.randomUUID()}, ${data.familyId}, ${name}, ${role}, 'active')
+        values (${id}, ${data.familyId}, ${name}, ${role}, 'active')
       `;
-      return { ok: true };
+      await ensureMemberWallets(sql, data.familyId);
+      return { id };
     } catch (err) {
       publicError(err, "Couldn't add that person.");
     }
   });
 
+export async function createFamilyEmailInvite(
+  sql: Sql,
+  userId: string,
+  input: { familyId: string; email: string; origin?: string; role?: string },
+) {
+  await requireFamily(sql, userId, input.familyId, "manage_people");
+  const email = cleanEmail(input.email);
+  const role = input.role ? assertFamilyInviteRole(input.role) : "adult";
+  const alreadyUser = await sql<{ id: string }>`
+    select id from "user" where lower(email) = ${email} limit 1
+  `;
+  if (alreadyUser[0]) {
+    const member = await sql<{ id: string }>`
+      select id from family_people
+      where family_id = ${input.familyId} and linked_user_id = ${alreadyUser[0].id} and status = 'active'
+    `;
+    if (member[0]) throw new Error("They're already in this family");
+  }
+  const open = await sql<{ id: string }>`
+    select id from family_invites
+    where family_id = ${input.familyId} and lower(email) = ${email}
+      and accepted_at is null and revoked_at is null and expires_at > now()
+    limit 1
+  `;
+  if (open[0]) throw new Error("That email already has an invite. Revoke it first.");
+  const token = await newToken();
+  const id = crypto.randomUUID();
+  await sql`
+    insert into family_invites (id, family_id, email, role, token_hash, invited_by, expires_at)
+    values (${id}, ${input.familyId}, ${email}, ${role}, ${await hashToken(token)}, ${userId}, now() + interval '7 days')
+  `;
+  const family = await sql<{ name: string }>`select name from families where id = ${input.familyId}`;
+  const origin = safeOrigin(input.origin);
+  const path = `/invite/${token}`;
+  const url = origin ? `${origin}${path}` : "";
+  const emailed = await sendFamilyInviteMail(email, await accountName(sql, userId), family[0]?.name || "your family", url);
+  return { path, url, emailed, email };
+}
+
 export const inviteFamilyMember = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((data: { familyId: string; role: string; email?: string; personId?: string }) => data)
+  .validator((data: { familyId: string; email: string; origin?: string; role?: string }) => data)
   .handler(async ({ context, data }) => {
     try {
       const { sql } = await ensureUser(context.userId);
-      await requireFamily(sql, context.userId, data.familyId, "manage_people");
-      const role = assertFamilyInviteRole(data.role);
-      const token = await newToken();
-      const id = crypto.randomUUID();
-      await sql`
-        insert into family_invites (id, family_id, person_id, email, role, token_hash, invited_by, expires_at)
-        values (${id}, ${data.familyId}, ${data.personId || null}, ${data.email?.trim() || null}, ${role}, ${await hashToken(token)}, ${context.userId}, now() + interval '7 days')
-      `;
-      return { path: `/invite/${token}` };
+      return await createFamilyEmailInvite(sql, context.userId, data);
     } catch (err) {
       publicError(err, "Couldn't create that invite.");
+    }
+  });
+
+export const removeFamilyPerson = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { familyId: string; personId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      const me = await requireFamily(sql, context.userId, data.familyId, "manage_people");
+      if (me.id === data.personId) throw new Error("You can't remove yourself");
+      const person = await sql<{ id: string; role: string }>`
+        select id, role from family_people
+        where id = ${data.personId} and family_id = ${data.familyId} and status = 'active'
+      `;
+      if (!person[0]) throw new Error("That person is not in this family");
+      if (person[0].role === "owner") throw new Error("The owner stays");
+      const wallet = await sql<{ id: string; balance: string }>`
+        select id, balance::text as balance from family_accounts where person_id = ${data.personId}
+      `;
+      if (wallet[0] && Number(wallet[0].balance) > 0) throw new Error("Move their money out first");
+      await sql`update family_people set status = 'removed' where id = ${data.personId}`;
+      if (wallet[0]) {
+        const used = await sql<{ id: string }>`
+          select id from family_entries
+          where account_id = ${wallet[0].id} or to_account_id = ${wallet[0].id}
+          limit 1
+        `;
+        if (!used[0]) await sql`delete from family_accounts where id = ${wallet[0].id}`;
+      }
+      return { ok: true };
+    } catch (err) {
+      publicError(err, "Couldn't remove that person.");
     }
   });
 
@@ -271,33 +415,67 @@ export async function acceptFamilyInvite(sql: Sql, userId: string, token: string
   const existing = await sql<{ id: string }>`
     select id from family_people where family_id = ${invite.family_id} and linked_user_id = ${userId} and status = 'active'
   `;
-  if (existing[0]) return { projectId: invite.family_id, family: true as const };
+  if (existing[0]) {
+    const real = await accountName(sql, userId);
+    await sql`update family_people set display_name = ${real} where id = ${existing[0].id}`;
+    await sql`update family_accounts set name = ${real} where person_id = ${existing[0].id}`;
+    await ensureMemberWallets(sql, invite.family_id);
+    return { projectId: invite.family_id, family: true as const };
+  }
   const state = familyInviteView({
     revokedAt: invite.revoked_at,
     acceptedAt: invite.accepted_at,
     expiresAt: invite.expires_at,
     now: Date.now(),
   });
-  claimFamilyInvite(state);
-  const claimed = await sql<{ id: string }>`
-    update family_invites set accepted_at = now(), accepted_by = ${userId}
-    where id = ${invite.id} and accepted_at is null and revoked_at is null and expires_at > now()
-    returning id
-  `;
-  if (!claimed[0]) throw new Error("This invite was already used");
-  const profile = await sql<{ full_name: string | null }>`select full_name from profiles where id = ${userId}`;
-  if (invite.person_id) {
-    const linked = await sql<{ id: string }>`
-      update family_people set linked_user_id = ${userId}, role = ${invite.role}
-      where id = ${invite.person_id} and family_id = ${invite.family_id} and linked_user_id is null
+  if (state !== "open") {
+    const mine = await sql<{ accepted_by: string | null }>`
+      select accepted_by from family_invites where id = ${invite.id}
+    `;
+    if (mine[0]?.accepted_by !== userId) claimFamilyInvite(state);
+  } else {
+    const claimed = await sql<{ id: string }>`
+      update family_invites set accepted_at = now(), accepted_by = ${userId}
+      where id = ${invite.id} and accepted_at is null and revoked_at is null and expires_at > now()
       returning id
     `;
-    if (linked[0]) return { projectId: invite.family_id, family: true as const };
+    if (!claimed[0]) {
+      const mine = await sql<{ id: string }>`
+        select id from family_invites where id = ${invite.id} and accepted_by = ${userId}
+      `;
+      if (!mine[0]) throw new Error("This invite was already used");
+    }
   }
-  await sql`
-    insert into family_people (id, family_id, display_name, linked_user_id, role, status)
-    values (${crypto.randomUUID()}, ${invite.family_id}, ${profile[0]?.full_name || "Family member"}, ${userId}, ${invite.role}, 'active')
+  const real = await accountName(sql, userId);
+  if (invite.person_id) {
+    const linked = await sql<{ id: string }>`
+      update family_people set linked_user_id = ${userId}, role = ${invite.role}, display_name = ${real}
+      where id = ${invite.person_id} and family_id = ${invite.family_id} and (linked_user_id is null or linked_user_id = ${userId})
+      returning id
+    `;
+    if (linked[0]) {
+      await sql`update family_accounts set name = ${real} where person_id = ${invite.person_id}`;
+      await ensureMemberWallets(sql, invite.family_id);
+      return { projectId: invite.family_id, family: true as const };
+    }
+  }
+  const again = await sql<{ id: string }>`
+    select id from family_people where family_id = ${invite.family_id} and linked_user_id = ${userId} and status = 'active'
   `;
+  if (!again[0]) {
+    await sql`
+      insert into family_people (id, family_id, display_name, linked_user_id, role, status)
+      select ${crypto.randomUUID()}, ${invite.family_id}, ${real}, ${userId}, ${invite.role}, 'active'
+      where not exists (
+        select 1 from family_people
+        where family_id = ${invite.family_id} and linked_user_id = ${userId} and status = 'active'
+      )
+    `;
+  } else {
+    await sql`update family_people set display_name = ${real} where id = ${again[0].id}`;
+    await sql`update family_accounts set name = ${real} where person_id = ${again[0].id}`;
+  }
+  await ensureMemberWallets(sql, invite.family_id);
   return { projectId: invite.family_id, family: true as const };
 }
 
@@ -312,19 +490,20 @@ export const addFamilyAccount = createServerFn({ method: "POST" })
       if (!name) throw new Error("Name the account");
       const kind = data.kind === "bank" || data.kind === "upi" || data.kind === "other" ? data.kind : "cash";
       const balance = parseMoney(data.balance || "0");
+      const id = crypto.randomUUID();
       await sql`
         insert into family_accounts (id, family_id, name, kind, balance)
-        values (${crypto.randomUUID()}, ${data.familyId}, ${name}, ${kind}, ${balance}::numeric)
+        values (${id}, ${data.familyId}, ${name}, ${kind}, ${balance}::numeric)
       `;
-      return { ok: true };
+      return { id };
     } catch (err) {
       publicError(err, "Couldn't add that account.");
     }
   });
 
 async function familyAccount(sql: Sql, familyId: string, accountId: string) {
-  const rows = await sql<{ id: string; balance: string }>`
-    select id, balance::text as balance from family_accounts where id = ${accountId} and family_id = ${familyId}
+  const rows = await sql<{ id: string; balance: string; person_id: string | null; name: string }>`
+    select id, balance::text as balance, person_id, name from family_accounts where id = ${accountId} and family_id = ${familyId}
   `;
   if (!rows[0]) throw new Error("That family account was not found");
   return rows[0];
@@ -351,24 +530,31 @@ export const postFamilyEntry = createServerFn({ method: "POST" })
       const amount = money(data.amount);
       const paidFrom = data.paidFrom === "personal" ? "personal" : "family";
       const reimburse = paidFrom === "personal" && Boolean(data.reimburse);
-      if (data.personId) {
-        const person = await sql<{ id: string }>`select id from family_people where id = ${data.personId} and family_id = ${data.familyId}`;
+      let personId = data.personId || null;
+      if (personId) {
+        const person = await sql<{ id: string }>`select id from family_people where id = ${personId} and family_id = ${data.familyId}`;
         if (!person[0]) throw new Error("That person is not in this family");
       }
-      if (data.accountId) await familyAccount(sql, data.familyId, data.accountId);
-      if ((data.kind === "contribution" || paidFrom === "family") && data.accountId) {
-        const account = await familyAccount(sql, data.familyId, data.accountId);
-        if (data.kind === "expense" && Number(account.balance) < Number(amount)) throw new Error("Family money is short");
-        const sign = data.kind === "contribution" ? amount : `-${amount}`;
-        await sql`update family_accounts set balance = balance + ${sign}::numeric where id = ${data.accountId}`;
+      if ((data.kind === "contribution" || (data.kind === "expense" && paidFrom === "family")) && !data.accountId) {
+        throw new Error("Choose whose account");
       }
-      if (data.kind === "expense" && paidFrom === "family" && !data.accountId) throw new Error("Choose the family account that paid");
+      if (data.accountId) {
+        const account = await familyAccount(sql, data.familyId, data.accountId);
+        if (!personId) personId = account.person_id;
+        if ((data.kind === "contribution" || paidFrom === "family") && data.kind !== "contribution" && Number(account.balance) < Number(amount)) {
+          throw new Error(`Not enough in ${account.name}`);
+        }
+        if (data.kind === "contribution" || paidFrom === "family") {
+          const sign = data.kind === "contribution" ? amount : `-${amount}`;
+          await sql`update family_accounts set balance = balance + ${sign}::numeric where id = ${data.accountId}`;
+        }
+      }
       const id = crypto.randomUUID();
       await sql`
         insert into family_entries (id, family_id, kind, amount, entry_date, category, person_id, account_id, paid_from, reimburse, note, created_by)
         values (
           ${id}, ${data.familyId}, ${data.kind}, ${amount}::numeric, ${data.date}, ${data.category?.trim() || null},
-          ${data.personId || null}, ${data.accountId || null}, ${paidFrom}, ${reimburse}, ${data.note?.trim() || null}, ${context.userId}
+          ${personId}, ${data.accountId || null}, ${paidFrom}, ${reimburse}, ${data.note?.trim() || null}, ${context.userId}
         )
       `;
       if (reimburse && data.personId) {
@@ -380,6 +566,33 @@ export const postFamilyEntry = createServerFn({ method: "POST" })
       return { ok: true };
     } catch (err) {
       publicError(err, "Couldn't save that.");
+    }
+  });
+
+export const transferFamilyMoney = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { familyId: string; fromAccountId: string; toAccountId: string; amount: string; date: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      await requireFamily(sql, context.userId, data.familyId, "record");
+      if (data.fromAccountId === data.toAccountId) throw new Error("Pick two different people");
+      const amount = money(data.amount);
+      const from = await familyAccount(sql, data.familyId, data.fromAccountId);
+      const to = await familyAccount(sql, data.familyId, data.toAccountId);
+      if (Number(from.balance) < Number(amount)) throw new Error(`Not enough in ${from.name}`);
+      await sql`update family_accounts set balance = balance - ${amount}::numeric where id = ${from.id}`;
+      await sql`update family_accounts set balance = balance + ${amount}::numeric where id = ${to.id}`;
+      await sql`
+        insert into family_entries (id, family_id, kind, amount, entry_date, person_id, account_id, to_account_id, paid_from, note, created_by)
+        values (
+          ${crypto.randomUUID()}, ${data.familyId}, 'transfer', ${amount}::numeric, ${data.date}, ${from.person_id},
+          ${from.id}, ${to.id}, 'family', ${`${from.name} → ${to.name}`}, ${context.userId}
+        )
+      `;
+      return { ok: true };
+    } catch (err) {
+      publicError(err, "Couldn't move that money.");
     }
   });
 
@@ -620,3 +833,124 @@ export const listBusinessPortfolio = createServerFn({ method: "POST" })
       publicError(err, "Couldn't load businesses.");
     }
   });
+
+export async function listFamilyBooks(sql: Sql, userId: string) {
+  const families = await sql<{ id: string; name: string; role: string }>`
+    select f.id, f.name, me.role
+    from families f
+    join family_people me on me.family_id = f.id and me.linked_user_id = ${userId} and me.status = 'active'
+    order by f.created_at
+  `;
+  const books = [];
+  for (const family of families) {
+    const people = await sql<{ display_name: string; role: string; balance: string | null }>`
+      select p.display_name, p.role, a.balance::text as balance
+      from family_people p
+      left join family_accounts a on a.person_id = p.id
+      where p.family_id = ${family.id} and p.status = 'active'
+      order by p.created_at
+    `;
+    const recent = await sql<{ kind: string; amount: string; entry_date: string; category: string | null; note: string | null; name: string | null }>`
+      select e.kind, e.amount::text as amount, e.entry_date::text as entry_date, e.category, e.note,
+             coalesce(a.name, p.display_name) as name
+      from family_entries e
+      left join family_accounts a on a.id = e.account_id
+      left join family_people p on p.id = e.person_id
+      where e.family_id = ${family.id}
+      order by e.entry_date desc, e.created_at desc
+      limit 6
+    `;
+    const total = people.reduce((sum, person) => sum + Number(person.balance || 0), 0);
+    books.push({
+      id: family.id,
+      name: family.name,
+      yourRole: family.role,
+      total: total.toFixed(2),
+      members: people.map((person) => ({ name: person.display_name, role: person.role, balance: person.balance || "0.00" })),
+      recent,
+    });
+  }
+  return books;
+}
+
+async function resolveFamilyBook(sql: Sql, userId: string, name: string) {
+  const rows = await sql<{ id: string; name: string }>`
+    select f.id, f.name
+    from families f
+    join family_people me on me.family_id = f.id and me.linked_user_id = ${userId} and me.status = 'active'
+    order by f.created_at
+  `;
+  if (!name) {
+    if (rows.length === 1) return rows[0]!;
+    throw new Error(rows.length ? `Which family? ${rows.map((row) => row.name).join(", ")}` : "You are not in a family yet");
+  }
+  const key = name.trim().toLowerCase();
+  const exact = rows.filter((row) => row.id === name || row.name.toLowerCase() === key);
+  if (exact.length === 1) return exact[0]!;
+  const fuzzy = rows.filter((row) => row.name.toLowerCase().includes(key));
+  if (fuzzy.length === 1) return fuzzy[0]!;
+  if (fuzzy.length > 1) throw new Error(`Multiple families match "${name}". Ask which one.`);
+  throw new Error(`No family named "${name}".`);
+}
+
+function pickFamilyPerson(
+  people: { id: string; display_name: string; linked_user_id: string | null; account_id: string | null; balance: string | null }[],
+  userId: string,
+  name: string,
+) {
+  const mine = people.find((person) => person.linked_user_id === userId);
+  if (!name || /^(me|i|myself|main|mera|meri)$/i.test(name)) {
+    if (!mine?.account_id) throw new Error("Your family account is not ready");
+    return mine;
+  }
+  const key = name.trim().toLowerCase();
+  const hit = people.find((person) => person.display_name.toLowerCase() === key)
+    || people.find((person) => person.display_name.toLowerCase().includes(key));
+  if (!hit?.account_id) throw new Error(`${name} is not in this family. Invite them by email.`);
+  return hit;
+}
+
+export async function recordFamilyForAssistant(
+  sql: Sql,
+  userId: string,
+  input: { family?: string; kind: "in" | "out" | "move"; amount: string; person?: string; to?: string; what?: string; date: string },
+) {
+  const family = await resolveFamilyBook(sql, userId, input.family || "");
+  await requireFamily(sql, userId, family.id, "record");
+  const amount = money(input.amount);
+  const people = await sql<{ id: string; display_name: string; linked_user_id: string | null; account_id: string | null; balance: string | null }>`
+    select p.id, p.display_name, p.linked_user_id, a.id as account_id, a.balance::text as balance
+    from family_people p
+    left join family_accounts a on a.person_id = p.id
+    where p.family_id = ${family.id} and p.status = 'active'
+  `;
+  const from = pickFamilyPerson(people, userId, input.person || "");
+  const what = (input.what || "").trim();
+  if (input.kind === "move") {
+    const to = pickFamilyPerson(people, userId, input.to || "");
+    if (from.account_id === to.account_id) throw new Error("Pick two different people");
+    if (Number(from.balance || 0) < Number(amount)) throw new Error(`Not enough in ${from.display_name}`);
+    await sql`update family_accounts set balance = balance - ${amount}::numeric where id = ${from.account_id}`;
+    await sql`update family_accounts set balance = balance + ${amount}::numeric where id = ${to.account_id}`;
+    await sql`
+      insert into family_entries (id, family_id, kind, amount, entry_date, person_id, account_id, to_account_id, paid_from, note, created_by)
+      values (
+        ${crypto.randomUUID()}, ${family.id}, 'transfer', ${amount}::numeric, ${input.date}, ${from.id},
+        ${from.account_id}, ${to.account_id}, 'family', ${`${from.display_name} → ${to.display_name}`}, ${userId}
+      )
+    `;
+    return { family: family.name, kind: "move", amount, from: from.display_name, to: to.display_name };
+  }
+  if (input.kind === "out" && Number(from.balance || 0) < Number(amount)) throw new Error(`Not enough in ${from.display_name}`);
+  const sign = input.kind === "in" ? amount : `-${amount}`;
+  await sql`update family_accounts set balance = balance + ${sign}::numeric where id = ${from.account_id}`;
+  await sql`
+    insert into family_entries (id, family_id, kind, amount, entry_date, category, person_id, account_id, paid_from, note, created_by)
+    values (
+      ${crypto.randomUUID()}, ${family.id}, ${input.kind === "in" ? "contribution" : "expense"}, ${amount}::numeric, ${input.date},
+      ${input.kind === "out" ? (what || null) : null}, ${from.id}, ${from.account_id}, 'family',
+      ${input.kind === "in" ? (what || null) : null}, ${userId}
+    )
+  `;
+  return { family: family.name, kind: input.kind, amount, person: from.display_name, what: what || null };
+}

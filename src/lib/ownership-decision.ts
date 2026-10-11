@@ -43,7 +43,7 @@ export function memberOwnership(person: OwnershipPerson): { kind: OwnershipKind;
   if (person.kind === "investor" || person.role === "accountant" || person.role === "viewer" || person.role === "owner" || person.decision === "none" || person.linked) {
     return { kind: "none", label: "No shares", shares: 0n };
   }
-  if (person.role === "admin" || person.role === "member") return { kind: "undecided", label: "Undecided", shares: 0n };
+  if (person.role === "admin" || person.role === "member") return { kind: "undecided", label: "No percent yet", shares: 0n };
   return { kind: "none", label: "No shares", shares: 0n };
 }
 
@@ -58,8 +58,8 @@ export function needsOwnershipPrompt(person: OwnershipPerson): boolean {
 
 export function undecidedReminder(count: number): string | null {
   if (count <= 0) return null;
-  if (count === 1) return "1 team member has ownership undecided";
-  return `${count} team members have ownership undecided`;
+  if (count === 1) return "1 person has no percent yet";
+  return `${count} people have no percent yet`;
 }
 
 export function buildOwnershipView(input: { businessName: string; viewerRole: string; members: OwnershipPerson[] }) {
@@ -79,8 +79,8 @@ export function buildOwnershipView(input: { businessName: string; viewerRole: st
           memberId: next.id,
           userId: next.userId,
           name: next.name,
-          title: `Set ownership for ${next.name}?`,
-          body: `${next.name} has joined ${input.businessName} as a team member, but no company ownership has been assigned.`,
+          title: `Does ${next.name} own part of ${input.businessName}?`,
+          body: `They can use ${input.businessName} without owning it. Set a percent only if they should.`,
         }
       : null,
   };

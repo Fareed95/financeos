@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import type { Sql } from "@/lib/db";
-import { ownership, type Holder, type Ownership } from "@/lib/cap-table";
+import { ownership, parsePercentBps, planPercentGrant, type Holder, type Ownership } from "@/lib/cap-table";
 import {
   CHART,
   assertBalanced,
@@ -529,8 +529,17 @@ async function linkTarget(sql: Sql, businessId: string, userId: string) {
 function holderPosition(name: string | null, holders: Ownership[]) {
   const cleaned = name?.trim() || "";
   if (!cleaned) return { linked: false, shares: 0n, bps: 0n, holderName: null as string | null };
-  const found = holders.find((holder) => holder.name === cleaned);
-  return { linked: true, shares: found?.shares ?? 0n, bps: found?.bps ?? 0n, holderName: cleaned };
+  const found = holders.find((holder) => holder.name === cleaned)
+    ?? holders.find((holder) => holder.name.trim().toLowerCase() === cleaned.toLowerCase());
+  return { linked: true, shares: found?.shares ?? 0n, bps: found?.bps ?? 0n, holderName: found?.name ?? cleaned };
+}
+
+function positionForPerson(stakeholder: string | null, displayName: string, holders: Ownership[]) {
+  const linked = holderPosition(stakeholder, holders);
+  if (linked.shares > 0n) return linked;
+  const byName = holderPosition(displayName, holders);
+  if (byName.shares > 0n) return byName;
+  return stakeholder ? linked : { linked: false, shares: 0n, bps: 0n, holderName: null as string | null };
 }
 
 /** Someone who already joined, or paid a company cost, belongs on the business team. This does not issue shares. */
@@ -635,7 +644,7 @@ export async function loadOwnershipPeople(sql: Sql, businessId: string, holders:
   const row = meta[0];
   const people: Array<OwnershipPerson & { email: string | null; holderName: string | null }> = [];
   if (row) {
-    const position = holderPosition(row.owner_stakeholder_name, holders);
+    const position = positionForPerson(row.owner_stakeholder_name, row.owner_name || "Owner", holders);
     people.push({
       id: "owner",
       userId: row.owner_id,
@@ -651,7 +660,7 @@ export async function loadOwnershipPeople(sql: Sql, businessId: string, holders:
     });
   }
   for (const member of members) {
-    const position = holderPosition(member.stakeholder_name, holders);
+    const position = positionForPerson(member.stakeholder_name, member.full_name || "Member", holders);
     people.push({
       id: member.id,
       userId: member.user_id,
@@ -1053,6 +1062,54 @@ export const postBusinessShares = createServerFn({ method: "POST" })
       return await issueShares(sql, context.userId, businessId, data);
     } catch (err) {
       publicError(err, "Couldn't issue those shares.");
+    }
+  });
+
+export const giveBusinessPercent = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; holder: string; percent: string; date: string; linkUserId?: string | null; amount?: string | null }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql, businessId } = await withBusiness(context.userId, data.projectId, "manage_equity");
+      const holders = await holdersOf(sql, businessId);
+      const owner = await sql<{ user_id: string; full_name: string | null; owner_stakeholder_name: string | null }>`
+        select pr.user_id, p.full_name, b.owner_stakeholder_name
+        from businesses b
+        join projects pr on pr.id = b.project_id
+        left join profiles p on p.id = pr.user_id
+        where b.id = ${businessId}
+      `;
+      const founderName = (
+        holders.length > 0
+          ? owner[0]?.owner_stakeholder_name || owner[0]?.full_name || "Member"
+          : owner[0]?.full_name || "Member"
+      ).trim();
+      const plan = planPercentGrant({
+        holders,
+        holder: data.holder,
+        targetBps: parsePercentBps(data.percent),
+        founderName,
+      });
+      const target = data.holder.trim();
+      for (const row of plan.issuances) {
+        const shares = Number(row.shares);
+        if (!Number.isSafeInteger(shares) || shares <= 0) throw new Error("That percent doesn't fit");
+        const linkUserId = row.holder === target
+          ? data.linkUserId || null
+          : holders.length === 0 && row.holder === founderName
+            ? owner[0]?.user_id ?? null
+            : null;
+        await issueShares(sql, context.userId, businessId, {
+          holder: row.holder,
+          shares,
+          amount: row.holder === target ? data.amount || null : null,
+          date: data.date,
+          linkUserId,
+        });
+      }
+      return { ok: true as const };
+    } catch (err) {
+      publicError(err, "Couldn't save that percent.");
     }
   });
 
