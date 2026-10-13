@@ -49,6 +49,7 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
   const q = useQuery({ queryKey: ["family", familyId], queryFn: () => getFamily({ data: { familyId } }) });
   const [section, setSection] = useState<Section>("overview");
   const [action, setAction] = useState<DashAction>(null);
+  const [openPerson, setOpenPerson] = useState<string | null>(null);
   const today = todayISO();
 
   useEffect(() => {
@@ -145,31 +146,37 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
             {data.people.map((person) => {
               const wallet = data.accounts.find((account) => account.person_id === person.id);
               const canRemove = data.canPeople && person.id !== data.meId && person.role !== "owner";
+              const open = openPerson === person.id;
               return (
-                <div key={person.id} className="flex items-center gap-3 border-b border-border/60 py-3">
-                  <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-secondary text-sm font-medium">
-                    {(person.display_name.trim()[0] || "?").toUpperCase()}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium">{person.display_name}</p>
-                    {canRemove && (
-                      <button
-                        type="button"
-                        className="text-xs text-muted-foreground"
-                        onClick={() => {
-                          void removeFamilyPerson({ data: { familyId, personId: person.id } })
-                            .then(async () => {
-                              toast.success("Removed");
-                              await reload();
-                            })
-                            .catch((err: unknown) => toast.error(err instanceof Error ? err.message : "Couldn't remove"));
-                        }}
-                      >
-                        Remove
-                      </button>
-                    )}
-                  </div>
-                  <p className="tabular text-sm">{formatMoney(wallet?.balance ?? "0", currency)}</p>
+                <div key={person.id} className="border-b border-border/60">
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-3 py-3 text-left"
+                    onClick={() => setOpenPerson(open ? null : person.id)}
+                  >
+                    <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-full text-sm font-medium ${open ? "bg-foreground text-background" : "bg-secondary"}`}>
+                      {(person.display_name.trim()[0] || "?").toUpperCase()}
+                    </span>
+                    <p className="min-w-0 flex-1 truncate text-sm font-medium">{person.display_name}</p>
+                    <p className="tabular text-sm">{formatMoney(wallet?.balance ?? "0", currency)}</p>
+                  </button>
+                  {canRemove && (
+                    <button
+                      type="button"
+                      className="mb-2 pl-[52px] text-left text-xs text-muted-foreground"
+                      onClick={() => {
+                        void removeFamilyPerson({ data: { familyId, personId: person.id } })
+                          .then(async () => {
+                            if (openPerson === person.id) setOpenPerson(null);
+                            toast.success("Removed");
+                            await reload();
+                          })
+                          .catch((err: unknown) => toast.error(err instanceof Error ? err.message : "Couldn't remove"));
+                      }}
+                    >
+                      Remove
+                    </button>
+                  )}
                 </div>
               );
             })}
@@ -183,6 +190,16 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
               <InviteByEmail familyId={familyId} invites={data.invites} onSaved={reload} canHide />
             )}
           </section>
+
+          {openPerson && (
+            <PersonHistory
+              person={data.people.find((person) => person.id === openPerson) ?? null}
+              wallet={data.accounts.find((account) => account.person_id === openPerson) ?? null}
+              entries={data.entries}
+              currency={currency}
+              onClose={() => setOpenPerson(null)}
+            />
+          )}
 
           {data.due.length > 0 && (
             <div className="space-y-2">
@@ -239,6 +256,73 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
         <MorePanel familyId={familyId} data={data} currency={currency} today={today} onSaved={reload} />
       )}
     </div>
+  );
+}
+
+function PersonHistory({
+  person,
+  wallet,
+  entries,
+  currency,
+  onClose,
+}: {
+  person: { id: string; display_name: string } | null;
+  wallet: { id: string; balance: string } | null;
+  entries: {
+    id: string;
+    kind: string;
+    amount: string;
+    entry_date: string;
+    category: string | null;
+    note: string | null;
+    paid_from: string;
+    reimburse: boolean;
+    display_name: string | null;
+    account_id?: string | null;
+    to_account_id?: string | null;
+    account_name?: string | null;
+    to_name?: string | null;
+    person_id: string | null;
+  }[];
+  currency: string;
+  onClose: () => void;
+}) {
+  if (!person) return null;
+  const mine = entries.flatMap((row) => {
+    const onAccount = wallet ? row.account_id === wallet.id : row.person_id === person.id;
+    const incomingTransfer = Boolean(wallet) && row.kind === "transfer" && row.to_account_id === wallet?.id;
+    if (!onAccount && !incomingTransfer) return [];
+    if (incomingTransfer) {
+      return [{ ...row, kind: "contribution", note: `From ${row.account_name || "someone"}` }];
+    }
+    if (row.kind === "transfer") {
+      return [{ ...row, kind: "expense", category: `To ${row.to_name || "someone"}` }];
+    }
+    return [row];
+  });
+  const added = mine.filter((row) => row.kind === "contribution").reduce((sum, row) => sum + Number(row.amount), 0);
+  const spent = mine.filter((row) => row.kind === "expense" || row.kind === "payback").reduce((sum, row) => sum + Number(row.amount), 0);
+  return (
+    <section className="space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-medium">{person.display_name}</h2>
+          <p className="text-xs text-muted-foreground">
+            +{formatMoney(added.toFixed(2), currency)} in · −{formatMoney(spent.toFixed(2), currency)} out
+          </p>
+        </div>
+        <button type="button" className="text-sm text-muted-foreground" onClick={onClose}>Close</button>
+      </div>
+      {mine.length === 0 ? (
+        <p className="text-sm text-muted-foreground">Nothing on this account yet.</p>
+      ) : (
+        <div className="rounded-xl bg-card px-3 py-1 shadow-[var(--elev-shadow)]">
+          {mine.map((row) => (
+            <FamilyTxn key={row.id} row={row} currency={currency} />
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

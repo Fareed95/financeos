@@ -114,6 +114,7 @@ const TOOLS = [
             description: "Optional extra detail in English only. Keep the chat reply in the user's language instead.",
           },
           prepaid: { type: "boolean", description: "True for flights/hotels paid before a trip" },
+          confirm: { type: "boolean", description: "True only after they said to add it even though a similar one exists in the last 12 hours." },
         },
         required: ["type", "amount", "account"],
         additionalProperties: false,
@@ -526,6 +527,7 @@ const TOOLS = [
           to: { type: "string", description: "For a move, who receives the money." },
           what: { type: "string", description: "Short English title. Translate Hindi. Groceries, rent, salary." },
           date: { type: "string", description: "YYYY-MM-DD. Default today IST." },
+          confirm: { type: "boolean", description: "True only after they said to add it even though a similar one exists in the last 12 hours." },
         },
         required: ["kind", "amount"],
         additionalProperties: false,
@@ -1122,10 +1124,10 @@ async function runTool(
         order by created_at asc
         limit 1
       `;
-      if (recent[0]) {
+      if (recent[0] && !bool("confirm")) {
         return {
-          result: { id: recent[0].id, type, amount, account: acc.name, date, description, already: true },
-          summary: `Already on the ledger: ${type} ₹${amount} · ${label}. Not added again.`,
+          result: { id: recent[0].id, type, amount, account: acc.name, date, description, needsConfirm: true },
+          summary: `Similar ${label} ₹${amount} is already on ${acc.name} in the last 12 hours. Ask before adding.`,
           mutated: false,
         };
       }
@@ -1807,15 +1809,16 @@ async function runTool(
       to: str("to"),
       what: str("what"),
       date: str("date") || todayIST(),
+      confirm: rawArgs.confirm === true,
     });
-    const summary = saved.kind === "move"
+    const summary = "needsConfirm" in saved && saved.needsConfirm
+      ? `Similar ${saved.what || saved.kind} ₹${saved.amount} is already on ${saved.person} in the last 12 hours. Ask before adding.`
+      : saved.kind === "move"
       ? `Moved ₹${saved.amount} from ${saved.from} to ${saved.to}`
-      : saved.already
-        ? `Already on ${saved.person}'s family account: ₹${saved.amount}. Not added again.`
       : saved.kind === "in"
         ? `Added ₹${saved.amount} to ${saved.person}`
         : `Spent ₹${saved.amount} from ${saved.person}`;
-    return { result: saved, summary, mutated: !("already" in saved && saved.already) };
+    return { result: saved, summary, mutated: !("needsConfirm" in saved && saved.needsConfirm) };
   }
 
   throw new Error(`Unknown tool ${name}`);
@@ -1862,7 +1865,7 @@ FAMILY
 - Examples: "family mein 500 kirana mere account se" → kind out, person me, what Groceries. "dad ne 10k dale" → kind in, person Dad. "2k mere se mom ko" → kind move, person me, to Mom.
 - People join only by email. invite_family_member sends the mail. Do not invent a member. After they accept, their name is the name on their Kharcha account.
 - One expense from two accounts, like fees of 50000 with 25000 from me and 25000 from Bhai: split_family_expense. One title, parts for each person. Never two record_family_money calls.
-- To change an existing family entry, or put every entry on one person: update_family_entry. Never record_family_money for a correction.
+- To change one existing family entry, use update_family_entry. Never record_family_money for a correction. Fareed and Afreed are different people. Never move one person's money onto the other unless they explicitly say so.
 - If the email did not send, give them the url from the tool. Do not pretend the mail went out.
 If an account/category/project is unambiguous from the snapshot (e.g. only one UPI), use it. If two could match, ask one short question instead of guessing.
 For deletes, only act when they clearly asked.
@@ -1876,8 +1879,8 @@ EDIT AND DELETE
 - Delete only when they clearly said delete, hata, or remove.
 
 - One request is one entry. Never call add_transaction or record_family_money twice for the same sentence.
-- If "Already posted" or the snapshot already has that amount and title today, do not post it again. Say it's already there.
-- Post again only if they said again, another, ek aur, or a different amount.
+- If the tool says a similar entry is already there in the last 12 hours, do not add it and do not set confirm. Ask in one line, in their language: what it is, the amount, whose account, and whether to add it again.
+- Set confirm true only on a later message where they clearly said yes, add it, or daal do.
 
 Keep replies short. After a write, confirm what landed: amount, account, category/project, date — you may confirm in their language even though the ledger title is English. Offer one useful follow-up, not a lecture.
 Plain text only — no markdown, no bullet asterisks. Use short line breaks if you list things.

@@ -180,11 +180,11 @@ export const getFamily = createServerFn({ method: "POST" })
       `;
       const entries = await sql<{
         id: string; kind: string; amount: string; entry_date: string; category: string | null;
-        person_id: string | null; paid_from: string; reimburse: boolean; note: string | null; split_id: string | null; display_name: string | null;
+        person_id: string | null; account_id: string | null; to_account_id: string | null; paid_from: string; reimburse: boolean; note: string | null; split_id: string | null; display_name: string | null;
         account_name: string | null; to_name: string | null;
       }>`
         select e.id, e.kind, e.amount::text as amount, e.entry_date::text as entry_date, e.category,
-               e.person_id, e.paid_from, e.reimburse, e.note, e.split_id, p.display_name,
+               e.person_id, e.account_id, e.to_account_id, e.paid_from, e.reimburse, e.note, e.split_id, p.display_name,
                a.name as account_name, t.name as to_name
         from family_entries e
         left join family_people p on p.id = e.person_id
@@ -1067,7 +1067,7 @@ function pickFamilyPerson(
 export async function recordFamilyForAssistant(
   sql: Sql,
   userId: string,
-  input: { family?: string; kind: "in" | "out" | "move"; amount: string; person?: string; to?: string; what?: string; date: string },
+  input: { family?: string; kind: "in" | "out" | "move"; amount: string; person?: string; to?: string; what?: string; date: string; confirm?: boolean },
 ) {
   const family = await resolveFamilyBook(sql, userId, input.family || "");
   await requireFamily(sql, userId, family.id, "record");
@@ -1090,11 +1090,11 @@ export async function recordFamilyForAssistant(
       and person_id = ${from.id}
       and coalesce(note, '') = ${input.kind === "out" ? "" : what}
       and coalesce(category, '') = ${input.kind === "out" ? what : ""}
-      and created_at > now() - interval '7 days'
+      and created_at > now() - interval '12 hours'
     limit 1
   `;
-  if (recent[0] && input.kind !== "move") {
-    return { family: family.name, kind: input.kind, amount, person: from.display_name, what: what || null, already: true };
+  if (recent[0] && input.kind !== "move" && !input.confirm) {
+    return { family: family.name, kind: input.kind, amount, person: from.display_name, what: what || null, needsConfirm: true };
   }
   if (input.kind === "move") {
     const to = pickFamilyPerson(people, userId, input.to || "");
