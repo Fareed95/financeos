@@ -180,11 +180,11 @@ export const getFamily = createServerFn({ method: "POST" })
       `;
       const entries = await sql<{
         id: string; kind: string; amount: string; entry_date: string; category: string | null;
-        person_id: string | null; paid_from: string; reimburse: boolean; note: string | null; display_name: string | null;
+        person_id: string | null; paid_from: string; reimburse: boolean; note: string | null; split_id: string | null; display_name: string | null;
         account_name: string | null; to_name: string | null;
       }>`
         select e.id, e.kind, e.amount::text as amount, e.entry_date::text as entry_date, e.category,
-               e.person_id, e.paid_from, e.reimburse, e.note, p.display_name,
+               e.person_id, e.paid_from, e.reimburse, e.note, e.split_id, p.display_name,
                a.name as account_name, t.name as to_name
         from family_entries e
         left join family_people p on p.id = e.person_id
@@ -192,7 +192,7 @@ export const getFamily = createServerFn({ method: "POST" })
         left join family_accounts t on t.id = e.to_account_id
         where e.family_id = ${data.familyId}
         order by e.entry_date desc, e.created_at desc
-        limit 80
+        limit 300
       `;
       const due = await sql<{ person_id: string; display_name: string; open: string }>`
         select r.person_id, p.display_name, sum(r.amount - r.paid)::text as open
@@ -678,6 +678,51 @@ export const postFamilyEntry = createServerFn({ method: "POST" })
     }
   });
 
+export const postFamilySplit = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: {
+    familyId: string;
+    date: string;
+    category: string;
+    parts: { accountId: string; amount: string }[];
+  }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      await requireFamily(sql, context.userId, data.familyId, "record");
+      const category = data.category.trim();
+      if (!category) throw new Error("Say what it was");
+      const parts = data.parts
+        .map((part) => ({ accountId: part.accountId, amount: money(part.amount) }))
+        .filter((part) => Number(part.amount) > 0);
+      if (parts.length < 2) throw new Error("Split needs at least two accounts");
+      if (new Set(parts.map((part) => part.accountId)).size !== parts.length) throw new Error("Each person once");
+      const accounts = [];
+      for (const part of parts) {
+        const account = await familyAccount(sql, data.familyId, part.accountId);
+        if (Number(account.balance) < Number(part.amount)) throw new Error(`Not enough in ${account.name}`);
+        accounts.push(account);
+      }
+      const splitId = crypto.randomUUID();
+      for (let i = 0; i < parts.length; i += 1) {
+        const part = parts[i]!;
+        const account = accounts[i]!;
+        await sql`update family_accounts set balance = balance - ${part.amount}::numeric where id = ${part.accountId}`;
+        await sql`
+          insert into family_entries (
+            id, family_id, kind, amount, entry_date, category, person_id, account_id, paid_from, split_id, created_by
+          ) values (
+            ${crypto.randomUUID()}, ${data.familyId}, 'expense', ${part.amount}::numeric, ${data.date}, ${category},
+            ${account.person_id}, ${part.accountId}, 'family', ${splitId}, ${context.userId}
+          )
+        `;
+      }
+      return { ok: true };
+    } catch (err) {
+      publicError(err, "Couldn't save that split.");
+    }
+  });
+
 export const transferFamilyMoney = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((data: { familyId: string; fromAccountId: string; toAccountId: string; amount: string; date: string }) => data)
@@ -959,8 +1004,8 @@ export async function listFamilyBooks(sql: Sql, userId: string) {
       where p.family_id = ${family.id} and p.status = 'active'
       order by p.created_at
     `;
-    const recent = await sql<{ kind: string; amount: string; entry_date: string; category: string | null; note: string | null; name: string | null }>`
-      select e.kind, e.amount::text as amount, e.entry_date::text as entry_date, e.category, e.note,
+    const recent = await sql<{ id: string; kind: string; amount: string; entry_date: string; category: string | null; note: string | null; name: string | null }>`
+      select e.id, e.kind, e.amount::text as amount, e.entry_date::text as entry_date, e.category, e.note,
              coalesce(a.name, p.display_name) as name
       from family_entries e
       left join family_accounts a on a.id = e.account_id
@@ -1035,6 +1080,22 @@ export async function recordFamilyForAssistant(
   `;
   const from = pickFamilyPerson(people, userId, input.person || "");
   const what = (input.what || "").trim();
+  const kind = input.kind === "move" ? "transfer" : input.kind === "in" ? "contribution" : "expense";
+  const recent = await sql<{ id: string }>`
+    select id from family_entries
+    where family_id = ${family.id}
+      and kind = ${kind}
+      and amount = ${amount}::numeric
+      and entry_date = ${input.date}::date
+      and person_id = ${from.id}
+      and coalesce(note, '') = ${input.kind === "out" ? "" : what}
+      and coalesce(category, '') = ${input.kind === "out" ? what : ""}
+      and created_at > now() - interval '7 days'
+    limit 1
+  `;
+  if (recent[0] && input.kind !== "move") {
+    return { family: family.name, kind: input.kind, amount, person: from.display_name, what: what || null, already: true };
+  }
   if (input.kind === "move") {
     const to = pickFamilyPerson(people, userId, input.to || "");
     if (from.account_id === to.account_id) throw new Error("Pick two different people");
@@ -1062,4 +1123,133 @@ export async function recordFamilyForAssistant(
     )
   `;
   return { family: family.name, kind: input.kind, amount, person: from.display_name, what: what || null };
+}
+
+export async function updateFamilyForAssistant(
+  sql: Sql,
+  userId: string,
+  input: { family?: string; match?: string; person: string; amount?: string; what?: string },
+) {
+  const family = await resolveFamilyBook(sql, userId, input.family || "");
+  await requireFamily(sql, userId, family.id, "record");
+  const people = await sql<{ id: string; display_name: string; linked_user_id: string | null; account_id: string | null; balance: string | null }>`
+    select p.id, p.display_name, p.linked_user_id, a.id as account_id, a.balance::text as balance
+    from family_people p
+    left join family_accounts a on a.person_id = p.id
+    where p.family_id = ${family.id} and p.status = 'active'
+  `;
+  const key = input.person.trim().toLowerCase();
+  const named = people.find((person) => person.display_name.toLowerCase() === key)
+    || people.find((person) => person.display_name.toLowerCase().includes(key));
+  const wallets = await sql<{ id: string; name: string; person_id: string | null }>`
+    select id, name, person_id from family_accounts
+    where family_id = ${family.id} and name ilike ${"%" + key + "%"}
+    order by created_at
+    limit 1
+  `;
+  const wallet = wallets[0];
+  const person = named?.account_id
+    ? named
+    : wallet
+      ? {
+          id: wallet.person_id || named?.id || "",
+          display_name: wallet.name,
+          linked_user_id: null,
+          account_id: wallet.id,
+          balance: null,
+        }
+      : null;
+  if (!person?.account_id) throw new Error(`${input.person} is not in this family`);
+  const match = (input.match || "").trim();
+  const all = !match || /^(all|sab|everything|pura|saare|sare)$/i.test(match);
+  const like = `%${match}%`;
+  const rows = await sql<{ id: string; kind: string; amount: string; account_id: string | null; paid_from: string }>`
+    select id, kind, amount::text as amount, account_id, paid_from
+    from family_entries
+    where family_id = ${family.id}
+      and kind in ('contribution', 'expense')
+      and (${all} or category ilike ${like} or note ilike ${like} or id = ${match})
+  `;
+  if (!rows.length) throw new Error(all ? "Nothing in this family to move" : `No family entry matching "${match}"`);
+  const nextAmount = !all && rows.length === 1 && input.amount ? money(input.amount) : null;
+  const nextTitle = !all && rows.length === 1 ? (input.what || "").trim() : "";
+  for (const row of rows) {
+    const amount = nextAmount || row.amount;
+    if (row.paid_from === "family" && row.account_id && row.account_id !== person.account_id) {
+      const sign = row.kind === "contribution" ? row.amount : `-${row.amount}`;
+      await sql`update family_accounts set balance = balance - ${sign}::numeric where id = ${row.account_id}`;
+      await sql`update family_accounts set balance = balance + ${sign}::numeric where id = ${person.account_id}`;
+    }
+    if (nextAmount && nextAmount !== row.amount && row.paid_from === "family" && person.account_id) {
+      const delta = row.kind === "contribution"
+        ? Number(nextAmount) - Number(row.amount)
+        : Number(row.amount) - Number(nextAmount);
+      await sql`update family_accounts set balance = balance + ${delta}::numeric where id = ${person.account_id}`;
+    }
+    await sql`
+      update family_entries set
+        person_id = ${person.id || null},
+        account_id = ${person.account_id},
+        amount = ${amount}::numeric,
+        category = case when ${row.kind} = 'expense' and ${nextTitle} <> '' then ${nextTitle} else category end,
+        note = case when ${row.kind} = 'contribution' and ${nextTitle} <> '' then ${nextTitle} else note end
+      where id = ${row.id}
+    `;
+  }
+  return { family: family.name, person: person.display_name, updated: rows.length };
+}
+
+export async function splitFamilyForAssistant(
+  sql: Sql,
+  userId: string,
+  input: { family?: string; what: string; date: string; parts: { person?: string; amount?: string }[] },
+) {
+  const family = await resolveFamilyBook(sql, userId, input.family || "");
+  await requireFamily(sql, userId, family.id, "record");
+  const people = await sql<{ id: string; display_name: string; linked_user_id: string | null; account_id: string | null }>`
+    select p.id, p.display_name, p.linked_user_id, a.id as account_id
+    from family_people p
+    left join family_accounts a on a.person_id = p.id
+    where p.family_id = ${family.id} and p.status = 'active'
+  `;
+  const wallets = await sql<{ id: string; name: string; person_id: string | null }>`
+    select id, name, person_id from family_accounts where family_id = ${family.id}
+  `;
+  const parts = input.parts.map((part) => {
+    const key = (part.person || "").trim().toLowerCase();
+    const mine = !key || /^(me|i|myself|main|mera|meri)$/i.test(key);
+    const person = mine
+      ? people.find((row) => row.linked_user_id === userId)
+      : people.find((row) => row.display_name.toLowerCase() === key) || people.find((row) => row.display_name.toLowerCase().includes(key));
+    const wallet = person?.account_id
+      ? wallets.find((row) => row.id === person.account_id)
+      : wallets.find((row) => row.name.toLowerCase().includes(key));
+    if (!wallet) throw new Error(`${part.person || "That person"} is not in this family`);
+    return { accountId: wallet.id, amount: money(part.amount || "") };
+  });
+  if (parts.length < 2) throw new Error("Say how much from each person");
+  const category = input.what.trim();
+  if (!category) throw new Error("Say what it was");
+  const accounts = [];
+  for (const part of parts) {
+    const account = await familyAccount(sql, family.id, part.accountId);
+    if (Number(account.balance) < Number(part.amount)) throw new Error(`Not enough in ${account.name}`);
+    accounts.push(account);
+  }
+  const splitId = crypto.randomUUID();
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i]!;
+    const account = accounts[i]!;
+    await sql`update family_accounts set balance = balance - ${part.amount}::numeric where id = ${part.accountId}`;
+    await sql`
+      insert into family_entries (
+        id, family_id, kind, amount, entry_date, category, person_id, account_id, paid_from, split_id, created_by
+      ) values (
+        ${crypto.randomUUID()}, ${family.id}, 'expense', ${part.amount}::numeric, ${input.date}, ${category},
+        ${account.person_id}, ${part.accountId}, 'family', ${splitId}, ${userId}
+      )
+    `;
+  }
+  const total = parts.reduce((sum, part) => sum + Number(part.amount), 0).toFixed(2);
+  return { family: family.name, what: category, total, parts: parts.length };
 }

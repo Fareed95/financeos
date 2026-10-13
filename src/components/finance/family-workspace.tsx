@@ -21,6 +21,7 @@ import {
   moveToFamilyGoal,
   payFamilyBack,
   postFamilyEntry,
+  postFamilySplit,
   removeFamilyPerson,
   revokeFamilyInvite,
   saveFamilyBill,
@@ -205,7 +206,7 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
               />
             ) : (
               <div className="rounded-xl bg-card px-3 py-1 shadow-[var(--elev-shadow)]">
-                {data.entries.map((row) => (
+                {groupFamilyEntries(data.entries).map((row) => (
                   <FamilyTxn key={row.id} row={row} currency={currency} />
                 ))}
               </div>
@@ -218,7 +219,7 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
         <div className="space-y-3">
           <div className="rounded-xl bg-card px-3 py-1 shadow-[var(--elev-shadow)]">
             {data.entries.length === 0 && <p className="px-1 py-6 text-center text-sm text-muted-foreground">Nothing recorded yet.</p>}
-            {data.entries.map((row) => (
+            {groupFamilyEntries(data.entries).map((row) => (
               <FamilyTxn key={row.id} row={row} currency={currency} />
             ))}
           </div>
@@ -239,6 +240,38 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
       )}
     </div>
   );
+}
+
+function groupFamilyEntries<T extends {
+  id: string;
+  kind: string;
+  split_id?: string | null;
+  amount: string;
+  entry_date: string;
+  category: string | null;
+  note: string | null;
+  account_name?: string | null;
+}>(entries: T[]) {
+  const seen = new Set<string>();
+  const rows: Array<T & { parts?: T[] }> = [];
+  const titleOf = (row: T) => (row.category || row.note || row.kind).trim().toLowerCase();
+  for (const row of entries) {
+    if (seen.has(row.id)) continue;
+    const splitParts = row.split_id ? entries.filter((item) => item.split_id === row.split_id) : [];
+    const sameThing = row.kind === "expense" || row.kind === "contribution"
+      ? entries.filter((item) => item.kind === row.kind && item.entry_date.slice(0, 10) === row.entry_date.slice(0, 10) && titleOf(item) === titleOf(row))
+      : [];
+    const parts = splitParts.length > 1 ? splitParts : sameThing.length > 1 ? sameThing : [];
+    if (parts.length > 1) {
+      for (const part of parts) seen.add(part.id);
+      const total = parts.reduce((sum, item) => sum + Number(item.amount), 0);
+      rows.push({ ...row, amount: total.toFixed(2), parts });
+      continue;
+    }
+    seen.add(row.id);
+    rows.push(row);
+  }
+  return rows;
 }
 
 function familyIcon(row: { kind: string; category: string | null; note: string | null }): LucideIcon {
@@ -287,6 +320,7 @@ function FamilyTxn({
     reimburse: boolean;
     account_name?: string | null;
     to_name?: string | null;
+    parts?: { amount: string; account_name?: string | null }[];
   };
   currency: string;
 }) {
@@ -295,7 +329,8 @@ function FamilyTxn({
   const spent = row.kind === "expense" || row.kind === "payback";
   const color = incoming ? "text-income" : spent ? "text-expense" : "text-foreground";
   const prefix = incoming ? "+" : spent ? "−" : "";
-  const account = row.kind === "transfer" ? "" : row.account_name ? ` · ${row.account_name}` : "";
+  const splitLine = row.parts?.map((part) => `${formatMoney(part.amount, currency, { sign: "never" })} ${part.account_name || ""}`.trim()).join(" · ");
+  const account = row.kind === "transfer" ? "" : splitLine ? "" : row.account_name ? ` · ${row.account_name}` : "";
   const extra = row.paid_from === "personal" && row.reimburse ? " · to be paid back" : "";
   return (
     <div className="flex w-full items-center gap-3 px-1 py-2.5">
@@ -308,6 +343,7 @@ function FamilyTxn({
           {formatShortDate(row.entry_date.slice(0, 10))}
           {account}
           {extra}
+          {splitLine ? ` · ${splitLine}` : ""}
         </p>
       </div>
       <p className={cn("tabular shrink-0 text-sm font-medium", color)}>
@@ -337,9 +373,26 @@ function MoneySheet({
   const [what, setWhat] = useState("");
   const [fromId, setFromId] = useState(wallets[0]?.id ?? "");
   const [toId, setToId] = useState(wallets.find((row) => row.id !== wallets[0]?.id)?.id ?? "");
+  const [split, setSplit] = useState(false);
+  const [parts, setParts] = useState<Record<string, string>>({});
   const from = wallets.some((row) => row.id === fromId) ? fromId : (wallets[0]?.id ?? "");
   const to = wallets.some((row) => row.id === toId) && toId !== from ? toId : (wallets.find((row) => row.id !== from)?.id ?? "");
+  const totalCents = Math.round(Number(amount.replace(/[,₹\s]/g, "") || "0") * 100);
+  const partCents = wallets.reduce((sum, wallet) => sum + Math.round(Number((parts[wallet.id] || "0").replace(/[,₹\s]/g, "")) * 100), 0);
+  const leftCents = totalCents - partCents;
   if (wallets.length === 0) return <p className="text-sm text-muted-foreground">Add someone. Their account is created for you.</p>;
+  function fillEqual() {
+    if (!Number.isFinite(totalCents) || totalCents <= 0) return;
+    const base = Math.floor(totalCents / wallets.length);
+    let used = 0;
+    const next: Record<string, string> = {};
+    wallets.forEach((wallet, index) => {
+      const cents = index === wallets.length - 1 ? totalCents - used : base;
+      used += cents;
+      next[wallet.id] = (cents / 100).toFixed(2);
+    });
+    setParts(next);
+  }
   return (
     <form className="grid gap-3 rounded-2xl bg-card p-4" onSubmit={async (event) => {
       event.preventDefault();
@@ -348,6 +401,14 @@ function MoneySheet({
           if (!to) throw new Error("Add another person first");
           await transferFamilyMoney({ data: { familyId, fromAccountId: from, toAccountId: to, amount, date: today } });
           toast.success("Moved");
+        } else if (mode === "out" && split) {
+          if (!what.trim()) throw new Error("Say what it was");
+          if (leftCents !== 0) throw new Error("The parts have to add up to the total");
+          const chosen = wallets
+            .map((wallet) => ({ accountId: wallet.id, amount: parts[wallet.id] || "" }))
+            .filter((part) => Number(part.amount) > 0);
+          await postFamilySplit({ data: { familyId, date: today, category: what.trim(), parts: chosen } });
+          toast.success("Split saved");
         } else {
           await postFamilyEntry({
             data: {
@@ -369,14 +430,18 @@ function MoneySheet({
         toast.error(err instanceof Error ? err.message : "Couldn't save");
       }
     }}>
-      <p className="text-sm font-medium">{mode === "in" ? "Into whose account?" : mode === "out" ? "From whose account?" : "From"}</p>
-      <div className="flex flex-wrap gap-2">
-        {wallets.map((wallet) => (
-          <button key={wallet.id} type="button" onClick={() => setFromId(wallet.id)} className={`h-10 max-w-full truncate rounded-full px-3 text-sm ${from === wallet.id ? "bg-foreground text-background" : "bg-secondary"}`}>
-            {wallet.name}
-          </button>
-        ))}
-      </div>
+      {!(mode === "out" && split) && (
+        <>
+          <p className="text-sm font-medium">{mode === "in" ? "Into whose account?" : mode === "out" ? "From whose account?" : "From"}</p>
+          <div className="flex flex-wrap gap-2">
+            {wallets.map((wallet) => (
+              <button key={wallet.id} type="button" onClick={() => setFromId(wallet.id)} className={`h-10 max-w-full truncate rounded-full px-3 text-sm ${from === wallet.id ? "bg-foreground text-background" : "bg-secondary"}`}>
+                {wallet.name}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
       {mode === "move" && (
         <>
           <p className="text-sm font-medium">To</p>
@@ -391,7 +456,41 @@ function MoneySheet({
       )}
       <Input inputMode="decimal" placeholder="Amount" value={amount} onChange={(event) => setAmount(event.target.value)} aria-label="Amount" className="h-12 text-lg" />
       {mode !== "move" && (
-        <Input placeholder={mode === "out" ? "Groceries, rent…" : "What for, optional"} value={what} onChange={(event) => setWhat(event.target.value)} aria-label="What for" />
+        <Input placeholder={mode === "out" ? "Fees, groceries, rent…" : "What for, optional"} value={what} onChange={(event) => setWhat(event.target.value)} aria-label="What for" />
+      )}
+      {mode === "out" && wallets.length > 1 && (
+        <button
+          type="button"
+          className="h-10 text-left text-sm text-muted-foreground"
+          onClick={() => {
+            setSplit((open) => !open);
+          }}
+        >
+          {split ? "One account instead" : "Split between us"}
+        </button>
+      )}
+      {mode === "out" && split && (
+        <div className="grid gap-2">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-medium">From each account</p>
+            <button type="button" className="text-sm text-muted-foreground" onClick={fillEqual}>Equal</button>
+          </div>
+          {wallets.map((wallet) => (
+            <label key={wallet.id} className="grid grid-cols-[1fr_7rem] items-center gap-2">
+              <span className="truncate text-sm">{wallet.name}</span>
+              <Input
+                inputMode="decimal"
+                placeholder="0"
+                value={parts[wallet.id] || ""}
+                onChange={(event) => setParts((current) => ({ ...current, [wallet.id]: event.target.value }))}
+                aria-label={`${wallet.name} share`}
+              />
+            </label>
+          ))}
+          <p className={`text-xs ${leftCents === 0 ? "text-muted-foreground" : "text-destructive"}`}>
+            {leftCents === 0 ? "Adds up." : `Left ${leftCents > 0 ? "" : "over by "}${formatMoney((Math.abs(leftCents) / 100).toFixed(2), "INR", { sign: "never" })}`}
+          </p>
+        </div>
       )}
       {mode === "move" && <p className="text-xs text-muted-foreground">Family total stays the same. This is not an expense.</p>}
       <Button type="submit" className="h-12">{mode === "in" ? "Add money" : mode === "out" ? "Save expense" : "Move"}</Button>

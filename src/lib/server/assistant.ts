@@ -18,7 +18,7 @@ import type { Sql } from "@/lib/db";
 import type { AccountType, BudgetPeriod, ProjectStatus, ProjectType, TxnType } from "@/lib/types";
 import { defaultUsefulYears } from "@/lib/server/commitments";
 import { importProjectActivity } from "@/lib/server/business";
-import { createFamilyEmailInvite, listFamilyBooks, recordFamilyForAssistant } from "@/lib/server/family";
+import { createFamilyEmailInvite, listFamilyBooks, recordFamilyForAssistant, splitFamilyForAssistant, updateFamilyForAssistant } from "@/lib/server/family";
 import type { SplitMethod } from "@/lib/split";
 
 export type AssistantAction = { tool: string; summary: string; ok: boolean };
@@ -32,7 +32,7 @@ export type AssistantChatMessage = {
 
 const MODEL = "grok-4.5";
 const MAX_ROUNDS = 6;
-const HISTORY_LIMIT = 16;
+const HISTORY_LIMIT = 24;
 
 function todayIST(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
@@ -124,23 +124,23 @@ const TOOLS = [
     type: "function",
     function: {
       name: "update_transaction",
-      description: "Edit an existing transaction by id.",
+      description: "Edit one existing personal transaction. Pass id from the recent list when you have it. Otherwise pass match: a few words from the current title, or 'last'. Only send fields that should change.",
       parameters: {
         type: "object",
         properties: {
-          id: { type: "string" },
+          id: { type: "string", description: "Id from the snapshot. Omit if you pass match." },
+          match: { type: "string", description: "Existing title, amount, or 'last'. Not the new title." },
           type: { type: "string", enum: ["expense", "income", "transfer", "refund"] },
-          amount: { type: "string" },
+          amount: { type: "string", description: "The new amount, not the old one." },
           account: { type: "string" },
           category: { type: "string" },
           project: { type: "string" },
           to_account: { type: "string" },
           date: { type: "string" },
-          description: { type: "string", description: "Short English ledger title. Translate Hindi/Hinglish." },
-          notes: { type: "string", description: "English only." },
+          description: { type: "string", description: "New English title only if the title itself should change." },
+          notes: { type: "string" },
           prepaid: { type: "boolean" },
         },
-        required: ["id"],
         additionalProperties: false,
       },
     },
@@ -149,11 +149,13 @@ const TOOLS = [
     type: "function",
     function: {
       name: "delete_transaction",
-      description: "Delete a transaction by id. Confirm with the user if they did not clearly ask to delete.",
+      description: "Delete one personal transaction. Use id from the recent list, or match the title. Only when they clearly said delete, hata, or remove.",
       parameters: {
         type: "object",
-        properties: { id: { type: "string" } },
-        required: ["id"],
+        properties: {
+          id: { type: "string" },
+          match: { type: "string", description: "Existing title, amount, or 'last'." },
+        },
         additionalProperties: false,
       },
     },
@@ -533,6 +535,53 @@ const TOOLS = [
   {
     type: "function",
     function: {
+      name: "split_family_expense",
+      description: "One family expense paid from more than one member account. Example: fees of 50000, 25000 from me and 25000 from Bhai. Do not call record_family_money twice for this.",
+      parameters: {
+        type: "object",
+        properties: {
+          family: { type: "string" },
+          what: { type: "string", description: "Short English title, like School fees." },
+          date: { type: "string" },
+          parts: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                person: { type: "string" },
+                amount: { type: "string" },
+              },
+              required: ["person", "amount"],
+            },
+          },
+        },
+        required: ["what", "parts"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_family_entry",
+      description: "Edit family entries that already exist. Use this to move them onto someone's account, or to change one amount or title. Never use record_family_money to fix an old entry. That creates a second row.",
+      parameters: {
+        type: "object",
+        properties: {
+          family: { type: "string" },
+          match: { type: "string", description: "Existing title, entry id, or all." },
+          person: { type: "string", description: "Whose account these should sit on. Afreed, me, Mom." },
+          amount: { type: "string", description: "New amount, only when match is one entry." },
+          what: { type: "string", description: "New English title, only when match is one entry." },
+        },
+        required: ["person"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "invite_family_member",
       description: "Email an invite to join the family. They sign in, finish setup if new, and join with the name on their account. Never invent a member without an email.",
       parameters: {
@@ -685,7 +734,7 @@ async function loadOverview(sql: Sql, userId: string) {
       `select ${TXN_SELECT} ${TXN_FROM}
        where t.user_id = $1
        order by t.transaction_date desc, t.created_at desc
-       limit 8`,
+       limit 20`,
       [userId],
     ),
     sql<{ income: string; expense: string }>`
@@ -773,7 +822,7 @@ async function loadOverview(sql: Sql, userId: string) {
         )
       )
     order by e.spent_on desc
-    limit 40
+    limit 8
   `;
 
   return {
@@ -846,6 +895,37 @@ async function businessPayer(sql: Sql, projectId: string, actorId: string, name:
     || rows.find((row) => (row.full_name || "").toLowerCase().includes(key));
   if (!hit) throw new Error(`Couldn't find ${name} on this business`);
   return hit.user_id;
+}
+
+async function findTransaction(sql: Sql, userId: string, id: string, match: string) {
+  if (id) {
+    const rows = await sql.query<Record<string, unknown>>(
+      `select ${TXN_SELECT} ${TXN_FROM} where t.id = $1 and t.user_id = $2`,
+      [id, userId],
+    );
+    if (!rows[0]) throw new Error("Transaction not found");
+    return mapTxn(rows[0]);
+  }
+  const key = match.trim();
+  if (!key) throw new Error("Which transaction? Say the title or the amount.");
+  const last = /^(last|latest|previous|pichla|pichli|last one|last wala)$/i.test(key);
+  const amountKey = key.replace(/[₹,\s]/g, "");
+  const rows = await sql.query<Record<string, unknown>>(
+    `select ${TXN_SELECT} ${TXN_FROM}
+     where t.user_id = $1
+       and ($2::boolean or t.description ilike $3 or t.amount::text = $4 or t.amount::text = $4 || '.00')
+     order by t.transaction_date desc, t.created_at desc
+     limit 5`,
+    [userId, last, `%${key}%`, amountKey],
+  );
+  if (!rows.length) throw new Error(`No transaction matching "${key}"`);
+  const mapped = rows.map(mapTxn);
+  if (mapped.length === 1 || last) return mapped[0]!;
+  const exact = mapped.filter((row) => (row.description || "").toLowerCase() === key.toLowerCase());
+  if (exact.length === 1) return exact[0]!;
+  throw new Error(
+    `Which one? ${mapped.map((row) => `${row.description || row.type} ₹${row.amount} on ${row.transactionDate}`).join("; ")}`,
+  );
 }
 
 async function runTool(
@@ -974,16 +1054,11 @@ async function runTool(
 
   if (name === "add_transaction" || name === "update_transaction") {
     const isUpdate = name === "update_transaction";
-    const id = isUpdate ? str("id") : crypto.randomUUID();
-    if (isUpdate && !id) throw new Error("Need a transaction id to edit");
+    let id = isUpdate ? str("id") : crypto.randomUUID();
     let existing: Awaited<ReturnType<typeof mapTxn>> | null = null;
     if (isUpdate) {
-      const rows = await sql.query<Record<string, unknown>>(
-        `select ${TXN_SELECT} ${TXN_FROM} where t.id = $1 and t.user_id = $2`,
-        [id, userId],
-      );
-      if (!rows[0]) throw new Error("Transaction not found");
-      existing = mapTxn(rows[0]);
+      existing = await findTransaction(sql, userId, id, str("match"));
+      id = existing.id;
     }
     if (isUpdate) {
       if ((existing?.visibility ?? "personal") !== "personal") {
@@ -1031,6 +1106,30 @@ async function runTool(
       : existing?.description ?? null;
     const notes = Object.hasOwn(rawArgs, "notes") ? str("notes") || null : existing?.notes ?? null;
     const prepaid = Object.hasOwn(rawArgs, "prepaid") ? bool("prepaid") : existing?.isPrepaid ?? false;
+    const label = description || type;
+
+    if (!isUpdate) {
+      const recent = await sql<{ id: string }>`
+        select id from transactions
+        where user_id = ${userId}
+          and account_id = ${acc.id}
+          and type = ${type}
+          and amount = ${amount}::numeric
+          and transaction_date = ${date}::date
+          and coalesce(description, '') = ${description || ""}
+          and coalesce(project_id, '') = ${projectId || ""}
+          and created_at > now() - interval '12 hours'
+        order by created_at asc
+        limit 1
+      `;
+      if (recent[0]) {
+        return {
+          result: { id: recent[0].id, type, amount, account: acc.name, date, description, already: true },
+          summary: `Already on the ledger: ${type} ₹${amount} · ${label}. Not added again.`,
+          mutated: false,
+        };
+      }
+    }
 
     if (isUpdate) {
       await sql`
@@ -1053,7 +1152,6 @@ async function runTool(
       `;
     }
     const verb = isUpdate ? "Updated" : "Added";
-    const label = description || type;
     if (projectId && (type === "expense" || type === "income" || type === "refund")) {
       const biz = await sql<{ id: string }>`select id from businesses where project_id = ${projectId}`;
       if (biz[0]) await importProjectActivity(sql, userId, biz[0].id, projectId);
@@ -1066,7 +1164,8 @@ async function runTool(
   }
 
   if (name === "delete_transaction") {
-    const id = str("id");
+    const found = await findTransaction(sql, userId, str("id"), str("match"));
+    const id = found.id;
     const existing = await sql<{ id: string }>`
       select id from transactions where id = ${id} and user_id = ${userId}
     `;
@@ -1076,7 +1175,7 @@ async function runTool(
       delete from transactions where id = ${id} and user_id = ${userId} returning id
     `;
     if (!rows[0]) throw new Error("Transaction not found");
-    return { result: { ok: true, id }, summary: "Deleted that transaction", mutated: true };
+    return { result: { ok: true, id }, summary: `Deleted ${found.description || found.type} ₹${found.amount}`, mutated: true };
   }
 
   if (name === "create_account") {
@@ -1640,7 +1739,7 @@ async function runTool(
     return { result: { amount, date: today }, summary: `${bill.name} ₹${amount} deducted`, mutated: true };
   }
 
-  if (name === "get_family" || name === "record_family_money" || name === "invite_family_member") {
+  if (name === "get_family" || name === "record_family_money" || name === "update_family_entry" || name === "split_family_expense" || name === "invite_family_member") {
     if (name === "get_family") {
       const books = await listFamilyBooks(sql, userId);
       const wanted = str("family").toLowerCase();
@@ -1663,6 +1762,41 @@ async function runTool(
         mutated: true,
       };
     }
+    if (name === "update_family_entry") {
+      const saved = await updateFamilyForAssistant(sql, userId, {
+        family: str("family"),
+        match: str("match"),
+        person: str("person"),
+        amount: str("amount"),
+        what: str("what"),
+      });
+      return {
+        result: saved,
+        summary: `Moved ${saved.updated} family entries onto ${saved.person}. No new row.`,
+        mutated: true,
+      };
+    }
+    if (name === "split_family_expense") {
+      const rawParts = Array.isArray(rawArgs.parts) ? rawArgs.parts : [];
+      const parts = rawParts.map((part) => {
+        const row = part && typeof part === "object" ? part as { person?: unknown; amount?: unknown } : {};
+        return {
+          person: typeof row.person === "string" ? row.person : "",
+          amount: typeof row.amount === "string" || typeof row.amount === "number" ? String(row.amount) : "",
+        };
+      });
+      const saved = await splitFamilyForAssistant(sql, userId, {
+        family: str("family"),
+        what: str("what"),
+        date: str("date") || todayIST(),
+        parts,
+      });
+      return {
+        result: saved,
+        summary: `${saved.what} ₹${saved.total} split across ${saved.parts} accounts`,
+        mutated: true,
+      };
+    }
     const kind = str("kind");
     if (kind !== "in" && kind !== "out" && kind !== "move") throw new Error("Say if money came in, was spent, or moved");
     const saved = await recordFamilyForAssistant(sql, userId, {
@@ -1676,10 +1810,12 @@ async function runTool(
     });
     const summary = saved.kind === "move"
       ? `Moved ₹${saved.amount} from ${saved.from} to ${saved.to}`
+      : saved.already
+        ? `Already on ${saved.person}'s family account: ₹${saved.amount}. Not added again.`
       : saved.kind === "in"
         ? `Added ₹${saved.amount} to ${saved.person}`
         : `Spent ₹${saved.amount} from ${saved.person}`;
-    return { result: saved, summary, mutated: true };
+    return { result: saved, summary, mutated: !("already" in saved && saved.already) };
   }
 
   throw new Error(`Unknown tool ${name}`);
@@ -1725,10 +1861,23 @@ FAMILY
 - The family total is the sum of each member's account. kind "in" adds to that person's account. kind "out" spends from their account. kind "move" shifts money between two members, does not change the total, and is not an expense.
 - Examples: "family mein 500 kirana mere account se" → kind out, person me, what Groceries. "dad ne 10k dale" → kind in, person Dad. "2k mere se mom ko" → kind move, person me, to Mom.
 - People join only by email. invite_family_member sends the mail. Do not invent a member. After they accept, their name is the name on their Kharcha account.
+- One expense from two accounts, like fees of 50000 with 25000 from me and 25000 from Bhai: split_family_expense. One title, parts for each person. Never two record_family_money calls.
+- To change an existing family entry, or put every entry on one person: update_family_entry. Never record_family_money for a correction.
 - If the email did not send, give them the url from the tool. Do not pretend the mail went out.
 If an account/category/project is unambiguous from the snapshot (e.g. only one UPI), use it. If two could match, ask one short question instead of guessing.
 For deletes, only act when they clearly asked.
 Dates without a year are this year. "Aaj" / "today" = ${overview.today}. "Kal" is tomorrow unless they mean yesterday from context.
+
+EDIT AND DELETE
+- "Change", "edit", "galat", "correct", "amount badal" means update_transaction. Do not add a second row.
+- Use the id from recent when that row is there. Otherwise pass match with the old title, or match "last" for the newest row.
+- On an edit, amount is the new amount. Pass description only when the title itself should change.
+- If the tool says which one, ask in one line. Never invent an id.
+- Delete only when they clearly said delete, hata, or remove.
+
+- One request is one entry. Never call add_transaction or record_family_money twice for the same sentence.
+- If "Already posted" or the snapshot already has that amount and title today, do not post it again. Say it's already there.
+- Post again only if they said again, another, ek aur, or a different amount.
 
 Keep replies short. After a write, confirm what landed: amount, account, category/project, date — you may confirm in their language even though the ledger title is English. Offer one useful follow-up, not a lecture.
 Plain text only — no markdown, no bullet asterisks. Use short line breaks if you list things.
@@ -1852,8 +2001,8 @@ export const sendAssistantMessage = createServerFn({ method: "POST" })
         values (${userMsgId}, ${userId}, 'user', ${text})
       `;
 
-      const history = await sql<{ role: string; content: string }>`
-        select role, content from assistant_messages
+      const history = await sql<{ role: string; content: string; actions: unknown }>`
+        select role, content, actions from assistant_messages
         where user_id = ${userId}
         order by created_at desc
         limit ${HISTORY_LIMIT}
@@ -1863,13 +2012,22 @@ export const sendAssistantMessage = createServerFn({ method: "POST" })
       const overview = await loadOverview(sql, userId);
       const messages: ChatMsg[] = [
         { role: "system", content: buildSystemPrompt(overview, profile.fullName) },
-        ...chronological.map((m) => ({
-          role: (m.role === "assistant" ? "assistant" : "user") as "assistant" | "user",
-          content: m.content,
-        })),
+        ...chronological.map((m) => {
+          const done = m.role === "assistant" && Array.isArray(m.actions)
+            ? m.actions
+                .map((action) => (action && typeof action === "object" && "summary" in action ? String((action as { summary?: unknown }).summary || "") : ""))
+                .filter(Boolean)
+                .join("; ")
+            : "";
+          return {
+            role: (m.role === "assistant" ? "assistant" : "user") as "assistant" | "user",
+            content: done ? `${m.content}\nAlready posted: ${done}` : m.content,
+          };
+        }),
       ];
 
       const actions: AssistantAction[] = [];
+      const seenWrites = new Set<string>();
       let mutated = false;
       let reply = "";
 
@@ -1884,6 +2042,20 @@ export const sendAssistantMessage = createServerFn({ method: "POST" })
         for (const call of calls) {
           const fn = call.function?.name ?? "";
           const args = parseArgs(call.function?.arguments ?? "");
+          const writeKey = `${fn}:${JSON.stringify(args)}`;
+          if (
+            seenWrites.has(writeKey) &&
+            (fn === "add_transaction" || fn === "record_family_money" || fn === "record_business_expense")
+          ) {
+            actions.push({ tool: fn, summary: "Skipped a duplicate post", ok: true });
+            messages.push({
+              role: "tool",
+              tool_call_id: call.id,
+              content: JSON.stringify({ error: "Already posted this. Do not add it again." }),
+            });
+            continue;
+          }
+          seenWrites.add(writeKey);
           try {
             const out = await runTool(sql, userId, fn, args, safeOrigin(data.origin ?? ""));
             mutated = mutated || out.mutated;
