@@ -43,11 +43,16 @@ function Onboarding() {
   const needsAccount = (query.data?.accounts.length ?? 0) === 0;
   const readyToLeave = Boolean(query.data?.profile.onboardingCompleted && !needsAccount);
 
-  useEffect(() => {
-    if (!readyToLeave || sent.current) return;
+  function leave() {
+    if (sent.current) return;
     sent.current = true;
     const back = consumeReturn();
     window.location.replace(back ?? "/");
+  }
+
+  useEffect(() => {
+    if (!readyToLeave) return;
+    leave();
   }, [readyToLeave]);
 
   if (isPending || (user && query.isPending) || readyToLeave) {
@@ -56,8 +61,7 @@ function Onboarding() {
   if (!user) return <RedirectToSignIn />;
 
   function goNext() {
-    const back = consumeReturn();
-    window.location.href = back ?? "/";
+    leave();
   }
 
   async function saveAccount() {
@@ -98,6 +102,7 @@ function Onboarding() {
       await qc.invalidateQueries();
       goNext();
     } catch (err) {
+      sent.current = false;
       toast.error(err instanceof Error ? err.message : "Couldn't finish setup");
       setBusy(false);
     }
@@ -110,6 +115,7 @@ function Onboarding() {
       await qc.invalidateQueries();
       goNext();
     } catch (err) {
+      sent.current = false;
       toast.error(err instanceof Error ? err.message : "Couldn't save that account");
       setBusy(false);
     }

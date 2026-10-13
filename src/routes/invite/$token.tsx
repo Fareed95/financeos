@@ -34,6 +34,10 @@ function InvitePage() {
       getBootstrap({ data: { from, to, displayName: user?.displayName ?? user?.primaryEmail ?? null } }),
   });
   const returnPath = `/invite/${token}`;
+  useEffect(() => {
+    sessionStorage.setItem("kharcha-invite-token", token);
+    rememberReturn(returnPath);
+  }, [returnPath, token]);
   const invite = q.data;
   const needsSetup = Boolean(ready.data && (!ready.data.profile.onboardingCompleted || ready.data.accounts.length === 0));
   const familyReady = Boolean(
@@ -51,6 +55,7 @@ function InvitePage() {
     void acceptInvite({ data: { token } })
       .then((res) => {
         toast.success("Joined");
+        sessionStorage.removeItem("kharcha-invite-token");
         void navigate({ to: "/family/$familyId", params: { familyId: res?.projectId ?? invite.projectId } });
       })
       .catch((err: unknown) => {
@@ -114,6 +119,7 @@ function InvitePage() {
                 try {
                   const res = await acceptInvite({ data: { token } });
                   toast.success("Joined");
+                  sessionStorage.removeItem("kharcha-invite-token");
                   if (invite.kind === "family") {
                     void navigate({ to: "/family/$familyId", params: { familyId: res?.projectId ?? invite.projectId } });
                   } else {

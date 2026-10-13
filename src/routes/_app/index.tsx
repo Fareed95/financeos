@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/finance/empty-state";
 import { TxnRow } from "@/components/finance/txn-row";
 import { TxnEditSheet } from "@/components/finance/txn-edit-sheet";
 import { InstallAppCard } from "@/components/install-app";
+import { IncomingFamilyInvites } from "@/components/finance/incoming-invites";
 import { useQuickAdd } from "@/components/finance/quick-add";
 import { MoneyInHome } from "@/components/finance/money-in-home";
 import { formatMoney, isNegative, isZero, percentUsed } from "@/lib/money";
@@ -45,6 +46,8 @@ function Home() {
           {accountCount ? ` · ${accountCount} ${accountCount === 1 ? "account" : "accounts"}` : ""}
         </p>
       </header>
+
+      <IncomingFamilyInvites />
 
       <MoneyInHome />
 

@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAppData } from "@/components/data-provider";
 import { useTheme } from "@/components/theme-provider";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,8 @@ import { authClient, signOut } from "@/lib/auth/client";
 import { hasGateSessionMarker } from "@/lib/auth/gate-session-marker";
 import { toast } from "sonner";
 import { InstallAppCard } from "@/components/install-app";
+import { InviteByEmail } from "@/components/finance/family-workspace";
+import { getFamily, listFamilies } from "@/lib/server/family";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -79,6 +82,7 @@ function SettingsPage() {
       <header>
         <h1 className="font-display text-3xl tracking-tight">Settings</h1>
       </header>
+      <FamilyInvitesSettings />
 
       <InstallAppCard />
 
@@ -473,4 +477,29 @@ function normalizeDate(raw: string): string {
     return `${y}-${m}-${d}`;
   }
   return s;
+}
+
+function FamilyInvitesSettings() {
+  const qc = useQueryClient();
+  const families = useQuery({ queryKey: ["families"], queryFn: () => listFamilies() });
+  const first = families.data?.[0];
+  const family = useQuery({
+    queryKey: ["family", first?.id],
+    enabled: Boolean(first?.id),
+    queryFn: () => getFamily({ data: { familyId: first!.id } }),
+  });
+  if (!first || !family.data?.canPeople) return null;
+  return (
+    <section className="space-y-2">
+      <h2 className="text-sm font-medium">Family invites</h2>
+      <p className="text-sm text-muted-foreground">{family.data.family?.name}. This stays here after you hide it on the money screen.</p>
+      <InviteByEmail
+        familyId={first.id}
+        invites={family.data.invites}
+        onSaved={async () => {
+          await qc.invalidateQueries({ queryKey: ["family", first.id] });
+        }}
+      />
+    </section>
+  );
 }

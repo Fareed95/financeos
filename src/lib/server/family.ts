@@ -14,6 +14,7 @@ import {
   type FamilyPermission,
 } from "@/lib/family-access";
 import { APP_NAME } from "@/lib/constants";
+import { inviteMessage, sendInviteSmtp } from "@/lib/server/mail";
 
 async function hashToken(token: string) {
   const { createHash } = await import("node:crypto");
@@ -72,23 +73,29 @@ async function accountName(sql: Sql, userId: string) {
 }
 
 async function sendFamilyInviteMail(to: string, fromName: string, familyName: string, url: string) {
+  const smtp = await sendInviteSmtp(to, fromName, familyName, url);
+  if (smtp.ok) return { emailed: true as const, mailError: null };
   const key = process.env.RESEND_API_KEY;
-  if (!key || !url.startsWith("http")) return false;
-  try {
-    const res = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        from: process.env.MAIL_FROM || `${APP_NAME} <onboarding@resend.dev>`,
-        to: [to],
-        subject: `${fromName} invited you to ${APP_NAME}`,
-        text: `${fromName} invited you to their family "${familyName}" on ${APP_NAME}.\n\nOpen the link to join. If you're new, sign in and finish setup first. The family will show the name on your account.\n\n${url}\n`,
-      }),
-    });
-    return res.ok;
-  } catch {
-    return false;
+  if (key && url.startsWith("http")) {
+    try {
+      const message = inviteMessage(fromName, familyName, url);
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          from: process.env.MAIL_FROM || `${APP_NAME} <onboarding@resend.dev>`,
+          to: [to],
+          subject: message.subject,
+          text: message.text,
+          html: message.html,
+        }),
+      });
+      if (res.ok) return { emailed: true as const, mailError: null };
+    } catch {
+      /* fall through to the Gmail message */
+    }
   }
+  return { emailed: false as const, mailError: smtp.error || "Email didn't send" };
 }
 
 async function ensureMemberWallets(sql: Sql, familyId: string) {
@@ -156,7 +163,9 @@ export const getFamily = createServerFn({ method: "POST" })
       const { sql } = await ensureUser(context.userId);
       const me = await requireFamily(sql, context.userId, data.familyId, "view");
       await ensureMemberWallets(sql, data.familyId);
-      const family = await sql<{ id: string; name: string }>`select id, name from families where id = ${data.familyId}`;
+      const family = await sql<{ id: string; name: string; show_invites: boolean }>`
+        select id, name, show_invites from families where id = ${data.familyId}
+      `;
       const people = await sql<{ id: string; display_name: string; role: string; linked_user_id: string | null }>`
         select id, display_name, role, linked_user_id from family_people
         where family_id = ${data.familyId} and status = 'active' order by created_at
@@ -210,13 +219,14 @@ export const getFamily = createServerFn({ method: "POST" })
         select id, name, amount::text as amount, due_day, last_paid::text as last_paid from family_bills where family_id = ${data.familyId} order by due_day
       `;
       const invites = canFamily(me.role, "manage_people")
-        ? await sql<{ id: string; email: string | null; role: string; expires_at: string; accepted_at: string | null; revoked_at: string | null }>`
-            select id, email, role, expires_at::text as expires_at, accepted_at::text as accepted_at, revoked_at::text as revoked_at
+        ? await sql<{ id: string; email: string | null; role: string; token: string | null; expires_at: string; accepted_at: string | null; revoked_at: string | null }>`
+            select id, email, role, token, expires_at::text as expires_at, accepted_at::text as accepted_at, revoked_at::text as revoked_at
             from family_invites where family_id = ${data.familyId} order by created_at desc
           `
         : [];
       return {
         family: family[0],
+        showInvites: family[0]?.show_invites !== false,
         meId: me.id,
         role: me.role,
         canRecord: canFamily(me.role, "record"),
@@ -232,7 +242,13 @@ export const getFamily = createServerFn({ method: "POST" })
         liabilities,
         bills,
         invites: invites.map((invite) => ({
-          ...invite,
+          id: invite.id,
+          email: invite.email,
+          role: invite.role,
+          path: invite.token ? `/invite/${invite.token}` : null,
+          expires_at: invite.expires_at,
+          accepted_at: invite.accepted_at,
+          revoked_at: invite.revoked_at,
           state: familyInviteView({
             revokedAt: invite.revoked_at,
             acceptedAt: invite.accepted_at,
@@ -296,15 +312,15 @@ export async function createFamilyEmailInvite(
   const token = await newToken();
   const id = crypto.randomUUID();
   await sql`
-    insert into family_invites (id, family_id, email, role, token_hash, invited_by, expires_at)
-    values (${id}, ${input.familyId}, ${email}, ${role}, ${await hashToken(token)}, ${userId}, now() + interval '7 days')
+    insert into family_invites (id, family_id, email, role, token, token_hash, invited_by, expires_at)
+    values (${id}, ${input.familyId}, ${email}, ${role}, ${token}, ${await hashToken(token)}, ${userId}, now() + interval '7 days')
   `;
   const family = await sql<{ name: string }>`select name from families where id = ${input.familyId}`;
   const origin = safeOrigin(input.origin);
   const path = `/invite/${token}`;
   const url = origin ? `${origin}${path}` : "";
-  const emailed = await sendFamilyInviteMail(email, await accountName(sql, userId), family[0]?.name || "your family", url);
-  return { path, url, emailed, email };
+  const mailed = await sendFamilyInviteMail(email, await accountName(sql, userId), family[0]?.name || "your family", url);
+  return { path, url, emailed: mailed.emailed, mailError: mailed.mailError, email };
 }
 
 export const inviteFamilyMember = createServerFn({ method: "POST" })
@@ -366,6 +382,99 @@ export const revokeFamilyInvite = createServerFn({ method: "POST" })
       return { ok: true };
     } catch (err) {
       publicError(err, "Couldn't revoke that invite.");
+    }
+  });
+
+export const copyFamilyInviteLink = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { familyId: string; inviteId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      await requireFamily(sql, context.userId, data.familyId, "manage_people");
+      const rows = await sql<{ id: string; token: string | null }>`
+        select id, token from family_invites
+        where id = ${data.inviteId} and family_id = ${data.familyId}
+          and accepted_at is null and revoked_at is null and expires_at > now()
+      `;
+      if (!rows[0]) throw new Error("That invite is no longer open");
+      let token = rows[0].token;
+      if (!token) {
+        token = await newToken();
+        await sql`
+          update family_invites set token = ${token}, token_hash = ${await hashToken(token)}
+          where id = ${data.inviteId}
+        `;
+      }
+      return { path: `/invite/${token}` };
+    } catch (err) {
+      publicError(err, "Couldn't copy that link.");
+    }
+  });
+
+export const setFamilyInvitesVisible = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { familyId: string; show: boolean }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      await requireFamily(sql, context.userId, data.familyId, "manage_people");
+      await sql`update families set show_invites = ${data.show} where id = ${data.familyId}`;
+      return { ok: true };
+    } catch (err) {
+      publicError(err, "Couldn't update that.");
+    }
+  });
+
+export const listMyFamilyInvites = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      return await sql<{ id: string; family_id: string; name: string; invited_by: string | null }>`
+        select i.id, i.family_id, f.name, p.full_name as invited_by
+        from family_invites i
+        join families f on f.id = i.family_id
+        join "user" u on u.id = ${context.userId} and lower(u.email) = lower(i.email)
+        left join profiles p on p.id = i.invited_by
+        where i.accepted_at is null and i.revoked_at is null and i.expires_at > now()
+          and not exists (
+            select 1 from family_people fp
+            where fp.family_id = i.family_id and fp.linked_user_id = ${context.userId} and fp.status = 'active'
+          )
+        order by i.created_at desc
+      `;
+    } catch (err) {
+      publicError(err, "Couldn't load invites.");
+    }
+  });
+
+export const acceptMyFamilyInvite = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { inviteId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      const mine = await sql<{ email: string }>`select email from "user" where id = ${context.userId}`;
+      const rows = await sql<{ id: string; token: string | null; email: string | null }>`
+        select id, token, email from family_invites
+        where id = ${data.inviteId} and accepted_at is null and revoked_at is null and expires_at > now()
+      `;
+      const invite = rows[0];
+      if (!invite?.email || invite.email.toLowerCase() !== (mine[0]?.email || "").toLowerCase()) {
+        throw new Error("This invite isn't for your email");
+      }
+      let token = invite.token;
+      if (!token) {
+        token = await newToken();
+        await sql`
+          update family_invites set token = ${token}, token_hash = ${await hashToken(token)}
+          where id = ${invite.id} and accepted_at is null
+        `;
+      }
+      return await acceptFamilyInvite(sql, context.userId, token);
+    } catch (err) {
+      publicError(err, "Couldn't join that family.");
     }
   });
 

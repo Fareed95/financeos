@@ -3,6 +3,7 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, type Sql } from "@/lib/db";
 import { ensureUser } from "@/lib/server/ensure";
 import { allocateSplits, type SplitMethod } from "@/lib/split";
+import { splitMessage } from "@/lib/server/mail";
 import { publicError } from "@/lib/utils";
 
 export type ShareLink = {
@@ -114,14 +115,16 @@ async function trySendEmail(to: string, fromName: string, description: string, s
   const key = process.env.RESEND_API_KEY;
   if (!key) return false;
   try {
+    const message = splitMessage(fromName, description, share, url);
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "content-type": "application/json" },
       body: JSON.stringify({
         from: process.env.MAIL_FROM || "Kharcha <onboarding@resend.dev>",
         to: [to],
-        subject: `${fromName} split a bill with you`,
-        text: `${fromName} split ${description || "a bill"} with you. Your share is ${share}.\n\n${url}\n`,
+        subject: message.subject,
+        text: message.text,
+        html: message.html,
       }),
     });
     return res.ok;

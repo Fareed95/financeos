@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeftRight, Banknote, BedDouble, Car, Folder, GraduationCap, HeartPulse, Receipt, ShoppingBag, Undo2, Utensils, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
@@ -14,6 +15,8 @@ import {
   contributeFromPersonal,
   getFamily,
   inviteFamilyMember,
+  copyFamilyInviteLink,
+  setFamilyInvitesVisible,
   markFamilyBillPaid,
   moveToFamilyGoal,
   payFamilyBack,
@@ -77,7 +80,10 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
     <div className="space-y-5 pt-4 md:max-w-xl">
       <header>
         <p className="text-xs tracking-wide text-muted-foreground uppercase">Family</p>
-        <h1 className="font-display text-3xl tracking-tight">{data.family.name}</h1>
+        <div className="flex items-start justify-between gap-3">
+          <h1 className="font-display text-3xl tracking-tight">{data.family.name}</h1>
+          <Link to="/family" search={{ list: "1" }} className="mt-2 shrink-0 text-sm text-muted-foreground">All families</Link>
+        </div>
       </header>
       <div className="flex flex-wrap gap-2">
         {TABS.map((item) => (
@@ -172,8 +178,8 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
                 <p className="tabular text-sm">{formatMoney(account.balance, currency)}</p>
               </div>
             ))}
-            {data.canPeople && (
-              <InviteByEmail familyId={familyId} invites={data.invites} onSaved={reload} />
+            {data.canPeople && data.showInvites && (
+              <InviteByEmail familyId={familyId} invites={data.invites} onSaved={reload} canHide />
             )}
           </section>
 
@@ -417,20 +423,60 @@ function ActionButton({ label, open, onClick }: { label: string; open: boolean; 
   );
 }
 
-function InviteByEmail({
+export function InviteByEmail({
   familyId,
   invites,
   onSaved,
+  canHide = false,
 }: {
   familyId: string;
-  invites: { id: string; email: string | null; state: string }[];
+  invites: { id: string; email: string | null; state: string; path: string | null }[];
   onSaved: () => Promise<void>;
+  canHide?: boolean;
 }) {
   const [email, setEmail] = useState("");
-  const [link, setLink] = useState("");
+  const [menu, setMenu] = useState(false);
   const open = invites.filter((invite) => invite.state === "open");
+
+  async function linkFor(invite: { id: string; path: string | null }) {
+    if (invite.path) return `${window.location.origin}${invite.path}`;
+    const fresh = await copyFamilyInviteLink({ data: { familyId, inviteId: invite.id } });
+    await onSaved();
+    return `${window.location.origin}${fresh?.path ?? ""}`;
+  }
+
+  async function copy(invite: { id: string; path: string | null }) {
+    const url = await linkFor(invite);
+    await navigator.clipboard.writeText(url);
+    toast.success("Link copied");
+  }
+
   return (
     <div className="space-y-2 pt-2">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium">Invite</p>
+        {canHide && (
+          <div className="relative">
+            <button type="button" aria-label="Invite options" className="grid h-9 w-9 place-items-center rounded-full text-lg text-muted-foreground" onClick={() => setMenu((value) => !value)}>
+              ···
+            </button>
+            {menu && (
+              <button
+                type="button"
+                className="absolute right-0 z-10 w-44 rounded-xl bg-card px-3 py-3 text-left text-sm shadow-[var(--elev-shadow)]"
+                onClick={() => {
+                  setMenu(false);
+                  void setFamilyInvitesVisible({ data: { familyId, show: false } })
+                    .then(onSaved)
+                    .catch((err: unknown) => toast.error(err instanceof Error ? err.message : "Couldn't hide"));
+                }}
+              >
+                Hide from this screen
+              </button>
+            )}
+          </div>
+        )}
+      </div>
       <form className="flex gap-2" onSubmit={async (event) => {
         event.preventDefault();
         try {
@@ -438,14 +484,8 @@ function InviteByEmail({
             data: { familyId, email, origin: window.location.origin, role: "adult" },
           });
           setEmail("");
-          if (saved?.emailed) {
-            setLink("");
-            toast.success(`Invite emailed to ${saved.email}`);
-          } else {
-            const url = saved?.url || `${window.location.origin}${saved?.path ?? ""}`;
-            setLink(url);
-            toast.error("Invite saved, but the email did not send. Share the link.");
-          }
+          if (saved?.emailed) toast.success(`Invite emailed to ${saved.email}`);
+          else toast.error(saved?.mailError || "Email didn't send. Use Copy on the invite.");
           await onSaved();
         } catch (err) {
           toast.error(err instanceof Error ? err.message : "Couldn't invite");
@@ -454,11 +494,13 @@ function InviteByEmail({
         <Input type="email" placeholder="Their email" value={email} onChange={(event) => setEmail(event.target.value)} aria-label="Invite email" />
         <Button type="submit" className="h-11 shrink-0">Invite</Button>
       </form>
-      {link && <p className="break-all text-xs text-muted-foreground">{link}</p>}
       {open.map((invite) => (
         <div key={invite.id} className="flex items-center justify-between gap-3 text-sm">
           <span className="min-w-0 truncate text-muted-foreground">{invite.email || "Invite"} · waiting</span>
-          <button type="button" className="text-expense" onClick={() => void revokeFamilyInvite({ data: { familyId, inviteId: invite.id } }).then(onSaved)}>Revoke</button>
+          <span className="flex shrink-0 gap-3">
+            <button type="button" className="text-muted-foreground" onClick={() => void copy(invite).catch((err: unknown) => toast.error(err instanceof Error ? err.message : "Couldn't copy"))}>Copy</button>
+            <button type="button" className="text-expense" onClick={() => void revokeFamilyInvite({ data: { familyId, inviteId: invite.id } }).then(onSaved)}>Revoke</button>
+          </span>
         </div>
       ))}
     </div>
@@ -853,6 +895,14 @@ function MorePanel({ familyId, data, currency, today, onSaved }: {
         {data.people.map((personRow) => (
           <p key={personRow.id} className="text-sm">{personRow.display_name} · <span className="capitalize text-muted-foreground">{personRow.role}</span></p>
         ))}
+        {data.canPeople && (
+          <InviteByEmail familyId={familyId} invites={data.invites} onSaved={onSaved} />
+        )}
+        {data.canPeople && !data.showInvites && (
+          <button type="button" className="h-11 text-left text-sm text-muted-foreground" onClick={() => void setFamilyInvitesVisible({ data: { familyId, show: true } }).then(onSaved)}>
+            Show invites on the money screen
+          </button>
+        )}
       </section>
       <section className="space-y-2">
         <p className="text-sm font-medium">Extra accounts</p>
