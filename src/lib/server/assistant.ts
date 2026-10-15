@@ -18,7 +18,7 @@ import type { Sql } from "@/lib/db";
 import type { AccountType, BudgetPeriod, ProjectStatus, ProjectType, TxnType } from "@/lib/types";
 import { defaultUsefulYears } from "@/lib/server/commitments";
 import { importProjectActivity } from "@/lib/server/business";
-import { createFamilyEmailInvite, listFamilyBooks, recordFamilyForAssistant, splitFamilyForAssistant, updateFamilyForAssistant } from "@/lib/server/family";
+import { createFamilyEmailInvite, listFamilyBooks, recordFamilyForAssistant, recordFamilyPartForAssistant, splitFamilyForAssistant, updateFamilyForAssistant } from "@/lib/server/family";
 import type { SplitMethod } from "@/lib/split";
 
 export type AssistantAction = { tool: string; summary: string; ok: boolean };
@@ -530,6 +530,27 @@ const TOOLS = [
           confirm: { type: "boolean", description: "True only after they said to add it even though a similar one exists in the last 12 hours." },
         },
         required: ["kind", "amount"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "record_family_part",
+      description: "A family bill that is only partly paid. The unpaid part stays outstanding and is not taken from any account. Each call records one part from one member. Call again for another member. Example: hall is 140000, pay 10000 from Afreed now.",
+      parameters: {
+        type: "object",
+        properties: {
+          family: { type: "string" },
+          what: { type: "string", description: "Short English title, like Hall." },
+          payee: { type: "string", description: "Who we are paying. Needed when creating the bill." },
+          total: { type: "string", description: "Full amount. Needed only the first time." },
+          amount: { type: "string", description: "The part being paid now." },
+          person: { type: "string", description: "Whose family account this part comes from." },
+          date: { type: "string" },
+        },
+        required: ["what", "amount", "person"],
         additionalProperties: false,
       },
     },
@@ -1741,7 +1762,7 @@ async function runTool(
     return { result: { amount, date: today }, summary: `${bill.name} ₹${amount} deducted`, mutated: true };
   }
 
-  if (name === "get_family" || name === "record_family_money" || name === "update_family_entry" || name === "split_family_expense" || name === "invite_family_member") {
+  if (name === "get_family" || name === "record_family_money" || name === "record_family_part" || name === "update_family_entry" || name === "split_family_expense" || name === "invite_family_member") {
     if (name === "get_family") {
       const books = await listFamilyBooks(sql, userId);
       const wanted = str("family").toLowerCase();
@@ -1796,6 +1817,22 @@ async function runTool(
       return {
         result: saved,
         summary: `${saved.what} ₹${saved.total} split across ${saved.parts} accounts`,
+        mutated: true,
+      };
+    }
+    if (name === "record_family_part") {
+      const saved = await recordFamilyPartForAssistant(sql, userId, {
+        family: str("family"),
+        what: str("what"),
+        payee: str("payee"),
+        total: str("total"),
+        amount: str("amount"),
+        person: str("person"),
+        date: str("date") || todayIST(),
+      });
+      return {
+        result: saved,
+        summary: `Paid ₹${saved.paidNow} toward ${saved.what} from ${saved.person}. ₹${saved.left} still left.`,
         mutated: true,
       };
     }
@@ -1864,7 +1901,8 @@ FAMILY
 - The family total is the sum of each member's account. kind "in" adds to that person's account. kind "out" spends from their account. kind "move" shifts money between two members, does not change the total, and is not an expense.
 - Examples: "family mein 500 kirana mere account se" → kind out, person me, what Groceries. "dad ne 10k dale" → kind in, person Dad. "2k mere se mom ko" → kind move, person me, to Mom.
 - People join only by email. invite_family_member sends the mail. Do not invent a member. After they accept, their name is the name on their Kharcha account.
-- One expense from two accounts, like fees of 50000 with 25000 from me and 25000 from Bhai: split_family_expense. One title, parts for each person. Never two record_family_money calls.
+- A bill that is not fully paid, like hall of 140000 and only 10000 given from Afreed: record_family_part. total is the full amount the first time. amount is only the part paid now. Another part from someone else is another call with the same what. Do not use record_family_money for the unpaid remainder.
+- One expense from two accounts that is fully paid now, like fees of 50000 with 25000 from me and 25000 from Bhai: split_family_expense. Never two record_family_money calls.
 - To change one existing family entry, use update_family_entry. Never record_family_money for a correction. Fareed and Afreed are different people. Never move one person's money onto the other unless they explicitly say so.
 - If the email did not send, give them the url from the tool. Do not pretend the mail went out.
 If an account/category/project is unambiguous from the snapshot (e.g. only one UPI), use it. If two could match, ask one short question instead of guessing.
@@ -1957,10 +1995,14 @@ export const listAssistantMessages = createServerFn({ method: "POST" })
         created_at: string;
       }>`
         select id, role, content, actions, created_at::text as created_at
-        from assistant_messages
-        where user_id = ${context.userId}
+        from (
+          select id, role, content, actions, created_at
+          from assistant_messages
+          where user_id = ${context.userId}
+          order by created_at desc
+          limit 200
+        ) recent
         order by created_at asc
-        limit 80
       `;
       return rows.map(mapRow);
     } catch (err) {

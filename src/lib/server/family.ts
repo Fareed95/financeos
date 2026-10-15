@@ -218,6 +218,12 @@ export const getFamily = createServerFn({ method: "POST" })
       const bills = await sql<{ id: string; name: string; amount: string; due_day: number; last_paid: string | null }>`
         select id, name, amount::text as amount, due_day, last_paid::text as last_paid from family_bills where family_id = ${data.familyId} order by due_day
       `;
+      const owes = await sql<{ id: string; name: string; payee: string; total: string; paid: string }>`
+        select id, name, payee, total::text as total, paid::text as paid
+        from family_dues
+        where family_id = ${data.familyId} and paid < total
+        order by created_at desc
+      `;
       const invites = canFamily(me.role, "manage_people")
         ? await sql<{ id: string; email: string | null; role: string; token: string | null; expires_at: string; accepted_at: string | null; revoked_at: string | null }>`
             select id, email, role, token, expires_at::text as expires_at, accepted_at::text as accepted_at, revoked_at::text as revoked_at
@@ -241,6 +247,7 @@ export const getFamily = createServerFn({ method: "POST" })
         investments,
         liabilities,
         bills,
+        owes,
         invites: invites.map((invite) => ({
           id: invite.id,
           email: invite.email,
@@ -618,6 +625,95 @@ async function familyAccount(sql: Sql, familyId: string, accountId: string) {
   return rows[0];
 }
 
+export const editFamilyEntry = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { familyId: string; entryId: string; amount: string; date: string; title: string; accountId?: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      await requireFamily(sql, context.userId, data.familyId, "record");
+      const rows = await sql<{
+        id: string; kind: string; amount: string; account_id: string | null; paid_from: string; category: string | null; note: string | null;
+      }>`
+        select id, kind, amount::text as amount, account_id, paid_from, category, note
+        from family_entries where id = ${data.entryId} and family_id = ${data.familyId}
+      `;
+      const entry = rows[0];
+      if (!entry) throw new Error("That transaction was not found");
+      if (entry.kind !== "contribution" && entry.kind !== "expense" && entry.kind !== "payback") {
+        throw new Error("This one can't be edited here");
+      }
+      const amount = money(data.amount);
+      const title = data.title.trim();
+      if (!title) throw new Error("Give it a name");
+      const nextAccountId = data.accountId || entry.account_id;
+      if (entry.paid_from === "family" && entry.account_id) {
+        const back = entry.kind === "contribution" ? `-${entry.amount}` : entry.amount;
+        await sql`update family_accounts set balance = balance + ${back}::numeric where id = ${entry.account_id}`;
+      }
+      let personId: string | null = null;
+      if (entry.paid_from === "family" && nextAccountId) {
+        const account = await familyAccount(sql, data.familyId, nextAccountId);
+        personId = account.person_id;
+        if (entry.kind !== "contribution" && Number(account.balance) < Number(amount)) {
+          if (entry.account_id) {
+            await sql`update family_accounts set balance = balance - ${entry.amount}::numeric where id = ${entry.account_id}`;
+          }
+          throw new Error(`Not enough in ${account.name}`);
+        }
+        const sign = entry.kind === "contribution" ? amount : `-${amount}`;
+        await sql`update family_accounts set balance = balance + ${sign}::numeric where id = ${account.id}`;
+      }
+      const category = entry.kind === "contribution" ? entry.category : title;
+      const note = entry.kind === "contribution" ? title : entry.note;
+      await sql`
+        update family_entries
+        set amount = ${amount}::numeric,
+            entry_date = ${data.date}::date,
+            category = ${category},
+            note = ${note},
+            account_id = ${nextAccountId},
+            person_id = coalesce(${personId}, person_id)
+        where id = ${entry.id}
+      `;
+      return { ok: true };
+    } catch (err) {
+      publicError(err, "Couldn't update that.");
+    }
+  });
+
+export const deleteFamilyEntry = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { familyId: string; entryId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      await requireFamily(sql, context.userId, data.familyId, "record");
+      const rows = await sql<{ id: string; kind: string; amount: string; account_id: string | null; paid_from: string; category: string | null; note: string | null }>`
+        select id, kind, amount::text as amount, account_id, paid_from, category, note
+        from family_entries where id = ${data.entryId} and family_id = ${data.familyId}
+      `;
+      const entry = rows[0];
+      if (!entry) throw new Error("That transaction was not found");
+      if (entry.paid_from === "family" && entry.account_id && entry.kind !== "transfer" && entry.kind !== "goal_move") {
+        const back = entry.kind === "contribution" ? `-${entry.amount}` : entry.amount;
+        await sql`update family_accounts set balance = balance + ${back}::numeric where id = ${entry.account_id}`;
+      }
+      if (entry.note === "Part payment" && entry.category) {
+        await sql`
+          update family_dues
+          set paid = greatest(0, paid - ${entry.amount}::numeric)
+          where family_id = ${data.familyId} and name = ${entry.category}
+        `;
+      }
+      await sql`delete from family_reimbursements where entry_id = ${entry.id}`;
+      await sql`delete from family_entries where id = ${entry.id}`;
+      return { ok: true };
+    } catch (err) {
+      publicError(err, "Couldn't delete that.");
+    }
+  });
+
 export const postFamilyEntry = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((data: {
@@ -943,6 +1039,125 @@ export const saveFamilyBill = createServerFn({ method: "POST" })
     }
   });
 
+export const saveFamilyDue = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: {
+    familyId: string;
+    name: string;
+    payee: string;
+    total: string;
+    paidNow?: string;
+    accountId?: string;
+    date: string;
+  }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      await requireFamily(sql, context.userId, data.familyId, "record");
+      const name = data.name.trim();
+      const payee = data.payee.trim();
+      if (!name) throw new Error("Say what it is");
+      if (!payee) throw new Error("Who are we paying?");
+      const total = money(data.total);
+      const dueId = crypto.randomUUID();
+      await sql`
+        insert into family_dues (id, family_id, name, payee, total, paid, created_by)
+        values (${dueId}, ${data.familyId}, ${name}, ${payee}, ${total}::numeric, 0, ${context.userId})
+      `;
+      if (data.paidNow?.trim()) await applyDuePayment(sql, context.userId, data.familyId, dueId, data.accountId || "", data.paidNow, data.date);
+      return { ok: true };
+    } catch (err) {
+      publicError(err, "Couldn't save that.");
+    }
+  });
+
+export const payFamilyDue = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { familyId: string; dueId: string; amount: string; accountId: string; date: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      await requireFamily(sql, context.userId, data.familyId, "record");
+      await applyDuePayment(sql, context.userId, data.familyId, data.dueId, data.accountId, data.amount, data.date);
+      return { ok: true };
+    } catch (err) {
+      publicError(err, "Couldn't pay that.");
+    }
+  });
+
+async function applyDuePayment(sql: Sql, userId: string, familyId: string, dueId: string, accountId: string, rawAmount: string, date: string) {
+  const amount = money(rawAmount);
+  const due = await sql<{ id: string; name: string; total: string; paid: string }>`
+    select id, name, total::text as total, paid::text as paid
+    from family_dues where id = ${dueId} and family_id = ${familyId}
+  `;
+  if (!due[0]) throw new Error("That bill was not found");
+  const left = Number(due[0].total) - Number(due[0].paid);
+  if (Number(amount) - left > 0.001) throw new Error(`Only ${left.toFixed(2)} is left`);
+  const account = await familyAccount(sql, familyId, accountId);
+  if (Number(account.balance) < Number(amount)) throw new Error(`Not enough in ${account.name}`);
+  await sql`update family_accounts set balance = balance - ${amount}::numeric where id = ${account.id}`;
+  await sql`
+    insert into family_entries (id, family_id, kind, amount, entry_date, category, person_id, account_id, paid_from, note, created_by)
+    values (
+      ${crypto.randomUUID()}, ${familyId}, 'expense', ${amount}::numeric, ${date}, ${due[0].name},
+      ${account.person_id}, ${account.id}, 'family', ${"Part payment"}, ${userId}
+    )
+  `;
+  await sql`
+    insert into family_due_payments (id, due_id, family_id, account_id, amount, paid_on, created_by)
+    values (${crypto.randomUUID()}, ${dueId}, ${familyId}, ${account.id}, ${amount}::numeric, ${date}, ${userId})
+  `;
+  await sql`update family_dues set paid = paid + ${amount}::numeric where id = ${dueId}`;
+}
+
+export async function recordFamilyPartForAssistant(
+  sql: Sql,
+  userId: string,
+  input: { family?: string; what: string; payee?: string; total?: string; amount: string; person: string; date: string },
+) {
+  const family = await resolveFamilyBook(sql, userId, input.family || "");
+  await requireFamily(sql, userId, family.id, "record");
+  const what = input.what.trim();
+  if (!what) throw new Error("Say what it is");
+  const people = await sql<{ id: string; display_name: string; linked_user_id: string | null; account_id: string | null; balance: string | null }>`
+    select p.id, p.display_name, p.linked_user_id, a.id as account_id, a.balance::text as balance
+    from family_people p
+    left join family_accounts a on a.person_id = p.id
+    where p.family_id = ${family.id} and p.status = 'active'
+  `;
+  const person = pickFamilyPerson(people, userId, input.person);
+  if (!person.account_id) throw new Error(`${person.display_name} has no family account`);
+  const like = `%${what}%`;
+  const existing = await sql<{ id: string; name: string; payee: string; total: string; paid: string }>`
+    select id, name, payee, total::text as total, paid::text as paid
+    from family_dues
+    where family_id = ${family.id} and paid < total
+      and (name ilike ${like} or payee ilike ${like})
+    order by created_at desc
+    limit 1
+  `;
+  let dueId = existing[0]?.id;
+  let total = existing[0]?.total;
+  let already = existing[0]?.paid ?? "0";
+  let payee = existing[0]?.payee;
+  if (!dueId) {
+    if (!input.total?.trim()) throw new Error("What's the full amount? This is only a part.");
+    payee = (input.payee || what).trim();
+    total = money(input.total);
+    dueId = crypto.randomUUID();
+    await sql`
+      insert into family_dues (id, family_id, name, payee, total, paid, created_by)
+      values (${dueId}, ${family.id}, ${what}, ${payee}, ${total}::numeric, 0, ${userId})
+    `;
+    already = "0";
+  }
+  const paying = money(input.amount);
+  await applyDuePayment(sql, userId, family.id, dueId, person.account_id, paying, input.date);
+  const left = (Number(total) - Number(already) - Number(paying)).toFixed(2);
+  return { family: family.name, what: existing[0]?.name || what, payee, person: person.display_name, paidNow: paying, left };
+}
+
 export const markFamilyBillPaid = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((data: { familyId: string; billId: string; date: string }) => data)
@@ -974,7 +1189,10 @@ export const listBusinessPortfolio = createServerFn({ method: "POST" })
             join journal_entries e on e.id = l.entry_id
             join ledger_accounts a on a.id = l.account_id
             join businesses b on b.id = e.business_id
-            where b.project_id = p.id and a.code in ('1000', '1010', '1020') and e.environment = 'live'
+            where b.project_id = p.id
+              and a.code in ('1000', '1010', '1020')
+              and e.environment = 'live'
+              and e.status = 'posted'
           ), 0)::text as cash
         from projects p
         left join businesses b on b.project_id = p.id
@@ -1014,6 +1232,12 @@ export async function listFamilyBooks(sql: Sql, userId: string) {
       order by e.entry_date desc, e.created_at desc
       limit 6
     `;
+    const owes = await sql<{ name: string; payee: string; total: string; paid: string }>`
+      select name, payee, total::text as total, paid::text as paid
+      from family_dues
+      where family_id = ${family.id} and paid < total
+      order by created_at desc
+    `;
     const total = people.reduce((sum, person) => sum + Number(person.balance || 0), 0);
     books.push({
       id: family.id,
@@ -1021,6 +1245,13 @@ export async function listFamilyBooks(sql: Sql, userId: string) {
       yourRole: family.role,
       total: total.toFixed(2),
       members: people.map((person) => ({ name: person.display_name, role: person.role, balance: person.balance || "0.00" })),
+      stillToPay: owes.map((row) => ({
+        name: row.name,
+        payee: row.payee,
+        total: row.total,
+        paid: row.paid,
+        left: (Number(row.total) - Number(row.paid)).toFixed(2),
+      })),
       recent,
     });
   }

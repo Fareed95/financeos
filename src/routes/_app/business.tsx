@@ -22,7 +22,10 @@ function BusinessHome() {
             <p className="font-medium">{business.name}</p>
             <p className="text-sm capitalize text-muted-foreground">{business.role}</p>
           </div>
-          <p className="tabular text-sm">{formatMoney(business.cash, currency)}</p>
+          <div className="text-right">
+            <p className="tabular text-sm">{formatMoney(business.cash, currency)}</p>
+            <p className="text-xs text-muted-foreground">Cash</p>
+          </div>
         </Link>
       ))}
       {!q.isPending && (q.data ?? []).length === 0 && (

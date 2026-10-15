@@ -57,21 +57,31 @@ export function BusinessListRow({
   meta,
   value,
   action,
+  onClick,
 }: {
   title: string;
   meta?: string;
   value?: string;
   action?: ReactNode;
+  onClick?: () => void;
 }) {
-  return (
-    <div className="flex items-center gap-3 border-b border-border/60 py-2.5 last:border-0">
+  const body = (
+    <>
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium">{title}</p>
         {meta && <p className="truncate text-xs text-muted-foreground">{meta}</p>}
       </div>
       {value && <p className="shrink-0 text-sm tabular">{value}</p>}
       {action}
-    </div>
+    </>
+  );
+  if (!onClick) {
+    return <div className="flex items-center gap-3 border-b border-border/60 py-2.5 last:border-0">{body}</div>;
+  }
+  return (
+    <button type="button" onClick={onClick} className="flex w-full items-center gap-3 border-b border-border/60 py-2.5 text-left last:border-0">
+      {body}
+    </button>
   );
 }
 

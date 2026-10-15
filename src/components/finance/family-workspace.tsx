@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeftRight, Banknote, BedDouble, Car, Folder, GraduationCap, HeartPulse, Receipt, ShoppingBag, Undo2, Utensils, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { EmptyState } from "@/components/finance/empty-state";
 import { formatMoney } from "@/lib/money";
 import { goalProgress } from "@/lib/family";
@@ -20,12 +21,16 @@ import {
   markFamilyBillPaid,
   moveToFamilyGoal,
   payFamilyBack,
+  payFamilyDue,
   postFamilyEntry,
   postFamilySplit,
+  editFamilyEntry,
+  deleteFamilyEntry,
   removeFamilyPerson,
   revokeFamilyInvite,
   saveFamilyBill,
   saveFamilyBudget,
+  saveFamilyDue,
   saveFamilyGoal,
   saveFamilyInvestment,
   saveFamilyLiability,
@@ -44,12 +49,24 @@ const TABS: { id: Section; label: string }[] = [
   { id: "more", label: "More" },
 ];
 
-export function FamilyWorkspace({ familyId, currency }: { familyId: string; currency: string }) {
+type FamilyEditTarget = {
+  id: string;
+  kind: string;
+  amount: string;
+  entry_date: string;
+  category: string | null;
+  note: string | null;
+  paid_from: string;
+  account_id?: string | null;
+};
+
+export function FamilyWorkspace({ familyId, currency, entryId }: { familyId: string; currency: string; entryId?: string }) {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["family", familyId], queryFn: () => getFamily({ data: { familyId } }) });
   const [section, setSection] = useState<Section>("overview");
   const [action, setAction] = useState<DashAction>(null);
   const [openPerson, setOpenPerson] = useState<string | null>(null);
+  const [editing, setEditing] = useState<FamilyEditTarget | null>(null);
   const today = todayISO();
 
   useEffect(() => {
@@ -58,6 +75,15 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
       delete document.documentElement.dataset.hideQuickAdd;
     };
   }, []);
+
+  const openedEntry = useRef<string | null>(null);
+  useEffect(() => {
+    if (!entryId || !q.data?.entries || openedEntry.current === entryId) return;
+    const hit = q.data.entries.find((row) => row.id === entryId);
+    if (!hit) return;
+    openedEntry.current = entryId;
+    setEditing(hit);
+  }, [entryId, q.data]);
 
   async function reload() {
     await qc.invalidateQueries({ queryKey: ["family", familyId] });
@@ -84,7 +110,7 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
         <p className="text-xs tracking-wide text-muted-foreground uppercase">Family</p>
         <div className="flex items-start justify-between gap-3">
           <h1 className="font-display text-3xl tracking-tight">{data.family.name}</h1>
-          <Link to="/family" search={{ list: "1" }} className="mt-2 shrink-0 text-sm text-muted-foreground">All families</Link>
+          <Link to="/family" search={{ list: "1", entry: undefined }} className="mt-2 shrink-0 text-sm text-muted-foreground">All families</Link>
         </div>
       </header>
       <div className="flex flex-wrap gap-2">
@@ -123,12 +149,12 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
               <button type="button" onClick={() => setAction(action === "out" ? null : "out")} className={`h-12 rounded-2xl text-sm font-medium ${action === "out" ? "bg-foreground text-background" : "bg-card"}`}>
                 Spent
               </button>
+              {data.accounts.length > 1 && (
+                <button type="button" onClick={() => setAction(action === "move" ? null : "move")} className={`col-span-2 h-12 rounded-2xl text-sm font-medium ${action === "move" ? "bg-foreground text-background" : "bg-card"}`}>
+                  Send to someone
+                </button>
+              )}
             </div>
-          )}
-          {data.canRecord && data.accounts.length > 1 && (
-            <button type="button" className="h-11 text-left text-sm text-muted-foreground" onClick={() => setAction(action === "move" ? null : "move")}>
-              {action === "move" ? "Close move" : "Move between us"}
-            </button>
           )}
           {(action === "in" || action === "out" || action === "move") && (
             <MoneySheet
@@ -140,6 +166,16 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
               onClose={() => setAction(null)}
             />
           )}
+
+          <StillToPay
+            familyId={familyId}
+            today={today}
+            currency={currency}
+            can={data.canRecord}
+            accounts={data.accounts}
+            owes={data.owes}
+            onSaved={reload}
+          />
 
           <section className="space-y-1">
             <p className="text-sm font-medium">Members</p>
@@ -198,6 +234,7 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
               entries={data.entries}
               currency={currency}
               onClose={() => setOpenPerson(null)}
+              onEdit={setEditing}
             />
           )}
 
@@ -224,7 +261,7 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
             ) : (
               <div className="rounded-xl bg-card px-3 py-1 shadow-[var(--elev-shadow)]">
                 {groupFamilyEntries(data.entries).map((row) => (
-                  <FamilyTxn key={row.id} row={row} currency={currency} />
+                  <FamilyTxn key={row.id} row={row} currency={currency} onEdit={setEditing} />
                 ))}
               </div>
             )}
@@ -237,7 +274,7 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
           <div className="rounded-xl bg-card px-3 py-1 shadow-[var(--elev-shadow)]">
             {data.entries.length === 0 && <p className="px-1 py-6 text-center text-sm text-muted-foreground">Nothing recorded yet.</p>}
             {groupFamilyEntries(data.entries).map((row) => (
-              <FamilyTxn key={row.id} row={row} currency={currency} />
+              <FamilyTxn key={row.id} row={row} currency={currency} onEdit={setEditing} />
             ))}
           </div>
           {data.canMoney && data.due.map((row) => (
@@ -255,6 +292,7 @@ export function FamilyWorkspace({ familyId, currency }: { familyId: string; curr
       {section === "more" && (
         <MorePanel familyId={familyId} data={data} currency={currency} today={today} onSaved={reload} />
       )}
+      <FamilyEditSheet familyId={familyId} target={editing} accounts={data.accounts} onClose={() => setEditing(null)} onSaved={reload} />
     </div>
   );
 }
@@ -265,6 +303,7 @@ function PersonHistory({
   entries,
   currency,
   onClose,
+  onEdit,
 }: {
   person: { id: string; display_name: string } | null;
   wallet: { id: string; balance: string } | null;
@@ -286,6 +325,7 @@ function PersonHistory({
   }[];
   currency: string;
   onClose: () => void;
+  onEdit: (row: FamilyEditTarget) => void;
 }) {
   if (!person) return null;
   const mine = entries.flatMap((row) => {
@@ -318,7 +358,7 @@ function PersonHistory({
       ) : (
         <div className="rounded-xl bg-card px-3 py-1 shadow-[var(--elev-shadow)]">
           {mine.map((row) => (
-            <FamilyTxn key={row.id} row={row} currency={currency} />
+            <FamilyTxn key={row.id} row={row} currency={currency} onEdit={onEdit} />
           ))}
         </div>
       )}
@@ -391,6 +431,7 @@ function familyTitle(row: {
 function FamilyTxn({
   row,
   currency,
+  onEdit,
 }: {
   row: {
     id: string;
@@ -402,38 +443,317 @@ function FamilyTxn({
     entry_date: string;
     amount: string;
     reimburse: boolean;
+    account_id?: string | null;
     account_name?: string | null;
     to_name?: string | null;
-    parts?: { amount: string; account_name?: string | null }[];
+    parts?: (FamilyEditTarget & { account_name?: string | null })[];
   };
   currency: string;
+  onEdit?: (row: FamilyEditTarget) => void;
 }) {
+  const [open, setOpen] = useState(false);
   const Icon = familyIcon(row);
   const incoming = row.kind === "contribution";
   const spent = row.kind === "expense" || row.kind === "payback";
   const color = incoming ? "text-income" : spent ? "text-expense" : "text-foreground";
   const prefix = incoming ? "+" : spent ? "−" : "";
-  const splitLine = row.parts?.map((part) => `${formatMoney(part.amount, currency, { sign: "never" })} ${part.account_name || ""}`.trim()).join(" · ");
-  const account = row.kind === "transfer" ? "" : splitLine ? "" : row.account_name ? ` · ${row.account_name}` : "";
+  const split = (row.parts?.length ?? 0) > 1;
+  const account = row.kind === "transfer" ? "" : split ? "" : row.account_name ? ` · ${row.account_name}` : "";
   const extra = row.paid_from === "personal" && row.reimburse ? " · to be paid back" : "";
+  const when = formatShortDate(row.entry_date.slice(0, 10));
+  const year = row.entry_date.slice(0, 4);
+  const kindLabel = split
+    ? "Split"
+    : incoming
+      ? "Money in"
+      : row.kind === "transfer"
+        ? "Moved"
+        : row.kind === "payback"
+          ? "Paid back"
+          : row.kind === "goal_move"
+            ? "Moved to a goal"
+            : "Spent";
   return (
-    <div className="flex w-full items-center gap-3 px-1 py-2.5">
-      <div className="grid size-10 shrink-0 place-items-center rounded-md bg-secondary text-muted-foreground">
-        <Icon className="size-4" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{familyTitle(row)}</p>
-        <p className="truncate text-xs text-muted-foreground">
-          {formatShortDate(row.entry_date.slice(0, 10))}
-          {account}
-          {extra}
-          {splitLine ? ` · ${splitLine}` : ""}
+    <div className="border-b border-border/40 last:border-0">
+      <button type="button" onClick={() => setOpen((value) => !value)} className="flex w-full items-center gap-3 px-1 py-2.5 text-left">
+        <div className="grid size-10 shrink-0 place-items-center rounded-md bg-secondary text-muted-foreground">
+          <Icon className="size-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium">{familyTitle(row)}</p>
+          <p className="truncate text-xs text-muted-foreground">
+            {when}
+            {account}
+            {extra}
+            {split ? " · Split" : ""}
+          </p>
+        </div>
+        <p className={cn("tabular shrink-0 text-sm font-medium", color)}>
+          {prefix}
+          {formatMoney(row.amount, currency, { sign: "never" })}
         </p>
+      </button>
+      {open && (
+        <div className="grid gap-1 px-1 pb-3 pl-14 text-sm">
+          <p className="text-muted-foreground">{kindLabel} · {when} {year}</p>
+          {row.kind === "transfer" ? (
+            <p>{row.account_name || "Someone"} → {row.to_name || "someone"}</p>
+          ) : split ? (
+            row.parts!.map((part) => (
+              <div key={part.id} className="flex items-center justify-between gap-3">
+                <span className="truncate">{part.account_name || "Account"}</span>
+                <span className="flex items-center gap-3">
+                  <span className="tabular shrink-0">{formatMoney(part.amount, currency, { sign: "never" })}</span>
+                  {onEdit && part.kind !== "transfer" && (
+                    <button type="button" className="text-xs text-muted-foreground" onClick={() => onEdit(part)}>Edit</button>
+                  )}
+                </span>
+              </div>
+            ))
+          ) : (
+            <p>{incoming ? "Into" : "From"} {row.account_name || row.display_name || "the family"}</p>
+          )}
+          {row.paid_from === "personal" && (
+            <p className="text-muted-foreground">{row.reimburse ? "Paid by them. Family pays this back." : "Paid from their own money."}</p>
+          )}
+          {onEdit && !split && row.kind !== "transfer" && row.kind !== "goal_move" && (
+            <button type="button" className="mt-1 w-fit text-sm text-muted-foreground" onClick={() => onEdit(row)}>Edit</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FamilyEditSheet({
+  familyId,
+  target,
+  accounts,
+  onClose,
+  onSaved,
+}: {
+  familyId: string;
+  target: FamilyEditTarget | null;
+  accounts: { id: string; name: string }[];
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [title, setTitle] = useState("");
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState("");
+  const [accountId, setAccountId] = useState("");
+  useEffect(() => {
+    if (!target) return;
+    setTitle(target.kind === "contribution" ? (target.note || "Added money") : (target.category || target.note || "Spent"));
+    setAmount(target.amount);
+    setDate(target.entry_date.slice(0, 10));
+    setAccountId(target.account_id || accounts[0]?.id || "");
+  }, [target, accounts]);
+  return (
+    <Sheet open={Boolean(target)} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <SheetContent side="bottom" className="overflow-y-auto pb-8">
+        <SheetHeader>
+          <SheetTitle>Edit</SheetTitle>
+        </SheetHeader>
+        {target && (
+          <form className="grid gap-2 px-5 pb-6" onSubmit={async (event) => {
+            event.preventDefault();
+            try {
+              await editFamilyEntry({ data: { familyId, entryId: target.id, amount, date, title, accountId } });
+              toast.success("Updated");
+              onClose();
+              await onSaved();
+            } catch (err) {
+              toast.error(err instanceof Error ? err.message : "Couldn't update");
+            }
+          }}>
+            <Input value={title} onChange={(event) => setTitle(event.target.value)} aria-label="Name" />
+            <Input inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} aria-label="Amount" />
+            <Input type="date" value={date} onChange={(event) => setDate(event.target.value)} aria-label="Date" />
+            {target.paid_from !== "personal" && accounts.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {accounts.map((account) => (
+                  <button key={account.id} type="button" onClick={() => setAccountId(account.id)} className={`h-10 max-w-full truncate rounded-full px-3 text-sm ${accountId === account.id ? "bg-foreground text-background" : "bg-secondary"}`}>
+                    {account.name}
+                  </button>
+                ))}
+              </div>
+            )}
+            <Button type="submit" className="h-11">Save</Button>
+            <Button type="button" variant="ghost" className="h-11 text-expense" onClick={async () => {
+              try {
+                await deleteFamilyEntry({ data: { familyId, entryId: target.id } });
+                toast.success("Deleted");
+                onClose();
+                await onSaved();
+              } catch (err) {
+                toast.error(err instanceof Error ? err.message : "Couldn't delete");
+              }
+            }}>
+              Delete
+            </Button>
+          </form>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function StillToPay({
+  familyId,
+  today,
+  currency,
+  can,
+  accounts,
+  owes,
+  onSaved,
+}: {
+  familyId: string;
+  today: string;
+  currency: string;
+  can: boolean;
+  accounts: { id: string; name: string; balance: string }[];
+  owes: { id: string; name: string; payee: string; total: string; paid: string }[];
+  onSaved: () => Promise<void>;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [payee, setPayee] = useState("");
+  const [total, setTotal] = useState("");
+  const [paidNow, setPaidNow] = useState("");
+  const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
+  const [payingId, setPayingId] = useState<string | null>(null);
+  const account = accounts.some((row) => row.id === accountId) ? accountId : (accounts[0]?.id ?? "");
+  const leftAll = owes.reduce((sum, row) => sum + Number(row.total) - Number(row.paid), 0);
+  if (!can && owes.length === 0) return null;
+  return (
+    <section className="space-y-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 className="text-sm font-medium">Still to pay</h2>
+        {owes.length > 0 && (
+          <p className="text-xs text-muted-foreground">{owes.length} {owes.length === 1 ? "person" : "people"} · {formatMoney(leftAll.toFixed(2), currency)} left</p>
+        )}
       </div>
-      <p className={cn("tabular shrink-0 text-sm font-medium", color)}>
-        {prefix}
-        {formatMoney(row.amount, currency, { sign: "never" })}
+      {owes.map((row) => {
+        const left = Number(row.total) - Number(row.paid);
+        return (
+          <DueRow
+            key={row.id}
+            row={row}
+            left={left}
+            currency={currency}
+            accounts={accounts}
+            open={payingId === row.id}
+            onOpen={() => setPayingId(payingId === row.id ? null : row.id)}
+            onPay={async (amount, fromAccount) => {
+              await payFamilyDue({ data: { familyId, dueId: row.id, amount, accountId: fromAccount, date: today } });
+              setPayingId(null);
+              await onSaved();
+            }}
+          />
+        );
+      })}
+      {can && !adding && (
+        <button type="button" className="h-11 text-sm text-muted-foreground" onClick={() => setAdding(true)}>
+          {owes.length ? "Add another" : "We still owe someone"}
+        </button>
+      )}
+      {can && adding && (
+        <form className="grid gap-2 rounded-2xl bg-card p-4" onSubmit={async (event) => {
+          event.preventDefault();
+          try {
+            if (paidNow.trim() && !account) throw new Error("Choose whose account is paying");
+            await saveFamilyDue({ data: { familyId, name, payee, total, paidNow, accountId: account, date: today } });
+            setName("");
+            setPayee("");
+            setTotal("");
+            setPaidNow("");
+            setAdding(false);
+            toast.success("Saved");
+            await onSaved();
+          } catch (err) {
+            toast.error(err instanceof Error ? err.message : "Couldn't save");
+          }
+        }}>
+          <Input placeholder="Hall, school, function" value={name} onChange={(event) => setName(event.target.value)} aria-label="What for" />
+          <Input placeholder="Who we pay" value={payee} onChange={(event) => setPayee(event.target.value)} aria-label="Who we pay" />
+          <Input inputMode="decimal" placeholder="Full amount" value={total} onChange={(event) => setTotal(event.target.value)} aria-label="Full amount" />
+          <Input inputMode="decimal" placeholder="Paying now, optional" value={paidNow} onChange={(event) => setPaidNow(event.target.value)} aria-label="Paying now" />
+          {paidNow.trim() && accounts.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {accounts.map((wallet) => (
+                <button key={wallet.id} type="button" onClick={() => setAccountId(wallet.id)} className={`h-10 max-w-full truncate rounded-full px-3 text-sm ${account === wallet.id ? "bg-foreground text-background" : "bg-secondary"}`}>
+                  {wallet.name}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="flex gap-2">
+            <Button type="submit" className="h-11 flex-1">Save</Button>
+            <Button type="button" variant="ghost" className="h-11" onClick={() => setAdding(false)}>Close</Button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
+function DueRow({
+  row,
+  left,
+  currency,
+  accounts,
+  open,
+  onOpen,
+  onPay,
+}: {
+  row: { name: string; payee: string; total: string; paid: string };
+  left: number;
+  currency: string;
+  accounts: { id: string; name: string }[];
+  open: boolean;
+  onOpen: () => void;
+  onPay: (amount: string, accountId: string) => Promise<void>;
+}) {
+  const [amount, setAmount] = useState("");
+  const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
+  const account = accounts.some((item) => item.id === accountId) ? accountId : (accounts[0]?.id ?? "");
+  return (
+    <div className="rounded-xl bg-card px-4 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium">{row.name}</p>
+          <p className="truncate text-xs text-muted-foreground">To {row.payee}</p>
+        </div>
+        <p className="tabular shrink-0 text-sm">{formatMoney(left.toFixed(2), currency)} left</p>
+      </div>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Paid {formatMoney(row.paid, currency)} of {formatMoney(row.total, currency)}
       </p>
+      <button type="button" className="mt-2 text-sm text-muted-foreground" onClick={onOpen}>{open ? "Close" : "Pay more"}</button>
+      {open && (
+        <form className="mt-2 grid gap-2" onSubmit={async (event) => {
+          event.preventDefault();
+          try {
+            if (!account) throw new Error("Choose whose account");
+            await onPay(amount, account);
+            setAmount("");
+            toast.success("Paid");
+          } catch (err) {
+            toast.error(err instanceof Error ? err.message : "Couldn't pay");
+          }
+        }}>
+          <Input inputMode="decimal" placeholder="Amount now" value={amount} onChange={(event) => setAmount(event.target.value)} aria-label="Amount now" />
+          <div className="flex flex-wrap gap-2">
+            {accounts.map((wallet) => (
+              <button key={wallet.id} type="button" onClick={() => setAccountId(wallet.id)} className={`h-10 max-w-full truncate rounded-full px-3 text-sm ${account === wallet.id ? "bg-foreground text-background" : "bg-secondary"}`}>
+                {wallet.name}
+              </button>
+            ))}
+          </div>
+          <Button type="submit" className="h-11">Pay</Button>
+        </form>
+      )}
     </div>
   );
 }

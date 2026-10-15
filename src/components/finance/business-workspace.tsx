@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { formatMoney, fromCents, isZero, toCents } from "@/lib/money";
 import { METRIC_HELP } from "@/lib/ledger";
 import { parsePercentBps, planPercentGrant, simulateRound } from "@/lib/cap-table";
@@ -22,6 +23,7 @@ import type { LearnSnapshot } from "@/lib/learn-explain";
 import { useCurrentUser } from "@/lib/auth/use-current-user";
 import { BusinessEmptyState, BusinessListRow, BusinessMetric, BusinessPageHeader, BusinessSection, BusinessStatusBadge } from "@/components/finance/business-ui";
 import { MoneyHub, ReimbursementDesk, SpendForm, TransferForm } from "@/components/finance/business-spend";
+import { deleteBusinessExpense, editBusinessExpense } from "@/lib/server/reimburse";
 
 type Section = "home" | "invoices" | "expenses" | "reports" | "equity" | "team" | "developer" | "guide" | "vendors" | "bills" | "money" | "budgets" | "loans" | "assets" | "reimbursements" | "settings";
 
@@ -60,6 +62,7 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
   const [section, setSection] = useState<Section>("home");
   const [more, setMore] = useState(false);
   const [add, setAdd] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [period, setPeriod] = useState("month");
   const [money, setMoney] = useState(false);
   const [transfer, setTransfer] = useState(false);
@@ -320,6 +323,7 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
                     title={row.title}
                     meta={[row.who, row.kind, row.date].filter(Boolean).join(" · ")}
                     value={row.income ? `+${moneyFmt(row.amount)}` : moneyFmt(row.amount)}
+                    onClick={booked.has(row.id) ? () => setEditingId(row.id) : undefined}
                   />
                 ))}
               </BusinessSection>
@@ -395,6 +399,7 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
                     meta={personal ? "Paid personally" : row.payerKind === "unpaid" ? "Not paid yet" : "Business account"}
                     value={moneyFmt(row.amount)}
                     action={<BusinessStatusBadge tone={tone}>{badge}</BusinessStatusBadge>}
+                    onClick={() => setEditingId(row.id)}
                   />
                   );
                 })}
@@ -560,6 +565,13 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
         )}
         </div>
         {learn && <LearnPanel page={learn} snapshot={snapshot} focusConcept={focusConcept} onClose={() => setLearn(null)} />}
+        <ExpenseEdit
+          expense={data.expenses.find((row) => row.id === editingId) ?? null}
+          accounts={data.expenseAccounts}
+          projectId={projectId}
+          onClose={() => setEditingId(null)}
+          onSaved={reload}
+        />
         {prompt && (
           <div className="fixed inset-0 z-50 flex items-end justify-center bg-overlay p-4 pb-24 sm:items-center sm:pb-4" role="dialog" aria-modal="true" aria-labelledby="ownership-prompt-title">
             <div className="w-full max-w-md rounded-xl bg-card p-5 shadow-[var(--elev-shadow)]">
@@ -613,6 +625,78 @@ export function BusinessWorkspace({ projectId, projectName, currency }: { projec
         )}
       </div>
     </div>
+  );
+}
+
+function ExpenseEdit({
+  expense,
+  accounts,
+  projectId,
+  onClose,
+  onSaved,
+}: {
+  expense: { id: string; amount: string; memo: string | null; spentOn: string; account_code: string } | null;
+  accounts: { code: string; name: string }[];
+  projectId: string;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [memo, setMemo] = useState("");
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState("");
+  const [code, setCode] = useState("");
+  useEffect(() => {
+    if (!expense) return;
+    setMemo(expense.memo || "");
+    setAmount(expense.amount);
+    setDate(expense.spentOn.slice(0, 10));
+    setCode(expense.account_code);
+  }, [expense]);
+  return (
+    <Sheet open={Boolean(expense)} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <SheetContent side="bottom" className="overflow-y-auto pb-8">
+        <SheetHeader>
+          <SheetTitle>Edit expense</SheetTitle>
+        </SheetHeader>
+        {expense && (
+          <form className="grid gap-2 px-5 pb-6" onSubmit={async (event) => {
+            event.preventDefault();
+            try {
+              await editBusinessExpense({ data: { projectId, expenseId: expense.id, amount, date, memo, code } });
+              toast.success("Updated");
+              onClose();
+              await onSaved();
+            } catch (err) {
+              toast.error(err instanceof Error ? err.message : "Couldn't update");
+            }
+          }}>
+            <Input value={memo} onChange={(event) => setMemo(event.target.value)} aria-label="Name" />
+            <Input inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} aria-label="Amount" />
+            <Input type="date" value={date} onChange={(event) => setDate(event.target.value)} aria-label="Date" />
+            <div className="flex flex-wrap gap-2">
+              {accounts.map((account) => (
+                <button key={account.code} type="button" onClick={() => setCode(account.code)} className={`h-10 rounded-full px-3 text-sm ${code === account.code ? "bg-foreground text-background" : "bg-secondary"}`}>
+                  {account.name}
+                </button>
+              ))}
+            </div>
+            <Button type="submit" className="h-11">Save</Button>
+            <Button type="button" variant="ghost" className="h-11 text-expense" onClick={async () => {
+              try {
+                await deleteBusinessExpense({ data: { projectId, expenseId: expense.id } });
+                toast.success("Deleted");
+                onClose();
+                await onSaved();
+              } catch (err) {
+                toast.error(err instanceof Error ? err.message : "Couldn't delete");
+              }
+            }}>
+              Delete
+            </Button>
+          </form>
+        )}
+      </SheetContent>
+    </Sheet>
   );
 }
 

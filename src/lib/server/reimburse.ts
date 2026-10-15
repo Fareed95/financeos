@@ -237,6 +237,128 @@ export async function payMemberBack(
   });
 }
 
+export const editBusinessExpense = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; expenseId: string; amount: string; date: string; memo: string; code: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      const access = await requireBusiness(sql, context.userId, data.projectId, "view_finance");
+      await rewriteBusinessExpense(sql, context.userId, access.businessId, access.role, data);
+      return { ok: true };
+    } catch (err) {
+      publicError(err, "Couldn't update that expense.");
+    }
+  });
+
+export const deleteBusinessExpense = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { projectId: string; expenseId: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const { sql } = await ensureUser(context.userId);
+      const access = await requireBusiness(sql, context.userId, data.projectId, "view_finance");
+      const rows = await sql<{ id: string; journal_id: string | null; reimbursed: string; payer_kind: string }>`
+        select id, journal_id, reimbursed::text as reimbursed, payer_kind
+        from biz_expenses where id = ${data.expenseId} and business_id = ${access.businessId}
+      `;
+      const expense = rows[0];
+      if (!expense) throw new Error("That expense was not found");
+      if (expense.payer_kind === "personal") {
+        if (!can(access.role, "record_personal_business_expense") && !can(access.role, "create_records")) {
+          throw new Error("You don't have access to do that.");
+        }
+      } else if (!can(access.role, "create_records")) {
+        throw new Error("You don't have access to do that.");
+      }
+      if (toCents(expense.reimbursed || "0") > 0n) throw new Error("Some of this was already paid back");
+      if (expense.journal_id) {
+        await sql`update journal_entries set status = 'void' where id = ${expense.journal_id} and business_id = ${access.businessId}`;
+      }
+      await sql`delete from biz_expenses where id = ${expense.id}`;
+      await audit(sql, access.businessId, context.userId, "expense.deleted", "expense", expense.id);
+      return { ok: true };
+    } catch (err) {
+      publicError(err, "Couldn't delete that expense.");
+    }
+  });
+
+async function rewriteBusinessExpense(
+  sql: Sql,
+  actorId: string,
+  businessId: string,
+  role: string,
+  input: { expenseId: string; amount: string; date: string; memo: string; code: string },
+) {
+  const rows = await sql<{
+    id: string; journal_id: string | null; reimbursed: string; payer_kind: string; place: string | null; payer_user_id: string | null;
+  }>`
+    select id, journal_id, reimbursed::text as reimbursed, payer_kind, place, payer_user_id
+    from biz_expenses where id = ${input.expenseId} and business_id = ${businessId}
+  `;
+  const expense = rows[0];
+  if (!expense) throw new Error("That expense was not found");
+  if (expense.payer_kind === "personal") {
+    if (!can(role, "record_personal_business_expense") && !can(role, "create_records")) {
+      throw new Error("You don't have access to do that.");
+    }
+  } else if (!can(role, "create_records")) {
+    throw new Error("You don't have access to do that.");
+  }
+  const account = expenseAccount(input.code);
+  const amount = toCents(parseMoney(input.amount));
+  if (amount < toCents(expense.reimbursed || "0")) throw new Error("Already paid back more than that");
+  const memo = input.memo.trim();
+  if (!memo) throw new Error("Give it a name");
+  const date = input.date.slice(0, 10);
+  const source = expense.payer_kind === "personal" || expense.payer_kind === "unpaid" ? expense.payer_kind : "business";
+  const lines = planSpend({
+    expenseCode: account.code,
+    amount,
+    source,
+    place: expense.place || "bank",
+  });
+  let journalId = expense.journal_id;
+  if (!journalId) {
+    journalId = await postJournal(sql, actorId, businessId, {
+      date,
+      memo,
+      source: "expense",
+      sourceId: expense.id,
+      lines,
+    });
+  } else {
+    await sql`delete from journal_lines where entry_id = ${journalId}`;
+    const ids = await sql<{ id: string; code: string }>`
+      select id, code from ledger_accounts where business_id = ${businessId} and is_active = true
+    `;
+    const byCode = new Map(ids.map((row) => [row.code, row.id]));
+    for (const line of lines) {
+      const accountId = byCode.get(line.code);
+      if (!accountId) throw new Error(`Unknown account ${line.code}`);
+      await sql`
+        insert into journal_lines (id, entry_id, account_id, debit, credit)
+        values (${crypto.randomUUID()}, ${journalId}, ${accountId}, ${fromCents(line.debit)}::numeric, ${fromCents(line.credit)}::numeric)
+      `;
+    }
+    await sql`
+      update journal_entries
+      set entry_date = ${date}::date, memo = ${memo}, status = 'posted'
+      where id = ${journalId} and business_id = ${businessId}
+    `;
+  }
+  await sql`
+    update biz_expenses
+    set amount = ${fromCents(amount)}::numeric,
+        memo = ${memo},
+        spent_on = ${date}::date,
+        account_code = ${account.code},
+        journal_id = ${journalId}
+    where id = ${expense.id}
+  `;
+  await audit(sql, businessId, actorId, "expense.updated", "expense", expense.id);
+}
+
 export const recordBusinessSpend = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((data: {

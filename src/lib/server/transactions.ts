@@ -219,6 +219,50 @@ export const listTransactions = createServerFn({ method: "POST" })
     }
   });
 
+export const searchLedger = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { query: string }) => data)
+  .handler(async ({ context, data }) => {
+    try {
+      const q = data.query.trim();
+      if (q.length < 2) return { personal: [], family: [] };
+      const { sql } = await ensureUser(context.userId);
+      const like = `%${q}%`;
+      const personal = await sql<{ id: string; title: string; amount: string; date: string; account: string | null; type: string }>`
+        select t.id, coalesce(t.description, t.type) as title, t.amount::text as amount,
+               t.transaction_date::text as date, a.name as account, t.type
+        from transactions t
+        left join accounts a on a.id = t.account_id
+        where t.user_id = ${context.userId}
+          and (
+            t.description ilike ${like}
+            or coalesce(t.notes, '') ilike ${like}
+            or coalesce(a.name, '') ilike ${like}
+          )
+        order by t.transaction_date desc, t.created_at desc
+        limit 20
+      `;
+      const family = await sql<{ id: string; familyId: string; familyName: string; title: string; amount: string; date: string; account: string | null; kind: string }>`
+        select e.id, e.family_id as "familyId", f.name as "familyName",
+               coalesce(e.category, e.note, e.kind) as title, e.amount::text as amount,
+               e.entry_date::text as date, a.name as account, e.kind
+        from family_entries e
+        join families f on f.id = e.family_id
+        join family_people me on me.family_id = f.id and me.linked_user_id = ${context.userId} and me.status = 'active'
+        left join family_accounts a on a.id = e.account_id
+        where coalesce(e.category, '') ilike ${like}
+           or coalesce(e.note, '') ilike ${like}
+           or coalesce(a.name, '') ilike ${like}
+           or f.name ilike ${like}
+        order by e.entry_date desc, e.created_at desc
+        limit 20
+      `;
+      return { personal, family };
+    } catch (err) {
+      publicError(err, "Couldn't search.");
+    }
+  });
+
 export const getTransaction = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((data: { id: string }) => data)

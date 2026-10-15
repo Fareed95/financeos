@@ -12,13 +12,14 @@ import { createFamily, listFamilies } from "@/lib/server/family";
 export const Route = createFileRoute("/_app/family/")({
   validateSearch: (search: Record<string, unknown>) => ({
     list: search.list === "1" ? ("1" as const) : undefined,
+    entry: typeof search.entry === "string" ? search.entry : undefined,
   }),
   component: FamilyHome,
 });
 
 function FamilyHome() {
   const { currency } = useAppData();
-  const { list } = Route.useSearch();
+  const { list, entry } = Route.useSearch();
   const q = useQuery({ queryKey: ["families"], queryFn: () => listFamilies() });
   const qc = useQueryClient();
   const navigate = useNavigate();
@@ -29,7 +30,7 @@ function FamilyHome() {
     return (
       <div className="space-y-4">
         <IncomingFamilyInvites />
-        <FamilyWorkspace familyId={families[0].id} currency={currency} />
+        <FamilyWorkspace familyId={families[0].id} currency={currency} entryId={entry} />
       </div>
     );
   }

@@ -15,6 +15,7 @@ import { UserButton } from "@/lib/auth/gates";
 import { cn } from "@/lib/utils";
 import { QuickAddFab, QuickAddSheet } from "@/components/finance/quick-add";
 import { ContextSwitch, contextFromPath } from "@/components/finance/context-switch";
+import { AppSearch } from "@/components/finance/app-search";
 import { NotifyGate } from "@/components/finance/notify-gate";
 import { useVisualKeyboard } from "@/hooks/use-visual-keyboard";
 
@@ -56,6 +57,9 @@ export function AppShell() {
         <Link to="/" className="mb-4 px-3 font-display text-2xl tracking-tight">
           Kharcha
         </Link>
+        <div className="mb-3 px-1">
+          <AppSearch />
+        </div>
         <div className="mb-6 px-1">
           <ContextSwitch />
         </div>
@@ -100,6 +104,7 @@ export function AppShell() {
             >
               <Sparkles className="size-5" />
             </Link>
+            <AppSearch />
           </header>
         )}
         <OfflineBanner />
